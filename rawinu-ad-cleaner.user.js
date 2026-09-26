@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.0.3
+// @version      1.0.4
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -25,7 +25,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.0.3';
+  const VERSION = '1.0.4';
   const KEY = `rawinu-cleaner:v1:${location.hostname}`;
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
@@ -286,7 +286,22 @@
   }
   installRealmGuards(page);
   function onActivation(e) {
-    if (!config.enabled || e.composedPath().includes(host)) return;
+    if (e.composedPath().includes(host)) {
+      // 网页的全局捕获监听器会吞掉点击。只转发本脚本封闭面板内的点击，
+      // 让按钮和选取层正常响应，同时不把这些事件交给网页广告监听器。
+      const target = (e.detail === 0 ? shadow?.activeElement : null) || shadow?.elementFromPoint?.(e.clientX, e.clientY);
+      if (target && target.getRootNode() === shadow) {
+        e.stopImmediatePropagation();
+        if (e.type === 'click') {
+          e.preventDefault();
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: false,
+            clientX: e.clientX, clientY: e.clientY, button: e.button, buttons: e.buttons, detail: e.detail,
+            ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey }));
+        }
+      }
+      return;
+    }
+    if (!config.enabled) return;
     if (pick) {
       if (e.type === 'click') clickPick(e);
       e.preventDefault(); e.stopImmediatePropagation(); return;
@@ -300,7 +315,7 @@
     }
     if (e.isTrusted && (e.type === 'click' || e.type === 'auxclick')) lastDirectLink = { href: el.href, time: Date.now() };
   }
-  for (const type of ['pointerdown', 'mousedown', 'touchstart', 'click', 'auxclick']) {
+  for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'auxclick']) {
     window.addEventListener(type, onActivation, { capture: true, passive: false });
   }
 
@@ -349,7 +364,7 @@
     css.textContent = `:host{color-scheme:light}*{box-sizing:border-box}button{font:13px/1.5 system-ui,sans-serif;cursor:pointer;border:1px solid #cbd5e1;border-radius:7px;padding:7px 10px;background:#fff;color:#172033;text-align:left}button:hover{background:#eef4ff}#badge{position:relative;z-index:3;background:#172033;color:white;border:0;box-shadow:0 2px 14px #0003}#panel{position:relative;z-index:3;width:295px;max-width:90vw;max-height:72vh;overflow:auto;background:#fff;color:#172033;border:1px solid #cbd5e1;border-radius:12px;padding:12px;margin-bottom:8px;font:13px/1.6 system-ui,sans-serif;box-shadow:0 5px 22px #0003}#panel[hidden]{display:none}h3{font-size:15px;margin:0 0 7px}.buttons{display:grid;gap:6px}p{margin:8px 0 0;overflow-wrap:anywhere}#hint{color:#475569}#frame{display:none;pointer-events:none;position:fixed;border:3px solid #f43f5e;background:#f43f5e18;z-index:2}#shield{display:none;position:fixed;inset:0;z-index:1;cursor:crosshair;background:transparent}`;
     shadow.append(css);
     details = document.createElement('section'); details.id = 'panel'; details.hidden = true;
-    const title = document.createElement('h3'); title.textContent = 'RawINU 广告清理'; details.append(title);
+    const title = document.createElement('h3'); title.textContent = `RawINU 广告清理 v${VERSION}`; details.append(title);
     statusNode = document.createElement('p'); details.append(statusNode);
     const group = document.createElement('div'); group.className = 'buttons'; details.append(group);
     const add = (text, fn, id) => { const b = button(text, fn); if (id) b.id = id; group.append(b); };
