@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.0.2
+// @version      1.0.3
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -25,7 +25,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.0.2';
+  const VERSION = '1.0.3';
   const KEY = `rawinu-cleaner:v1:${location.hostname}`;
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
@@ -43,6 +43,7 @@
   const AD_HOSTS = [
     'arsonojuncoes.com', 'nuancedmorosis.com', 'olivedrawer.com',
     'cabretpardao.com', 'zipcrypticbroadsheet.com',
+    'cuculireactor.qpon',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
     'popads.net', 'popcash.net', 'exoclick.com',
   ];
@@ -221,28 +222,69 @@
     attributeFilter: ['class', 'id', 'src', 'srcdoc', 'href', 'style', 'data-src', 'data-ad-slot', 'data-shb', MARK] });
   ensureStyle();
 
-  // 必须写入页面的 window，才能拦截页面脚本的 window.open。
-  // 不替换 fetch/XHR，不破坏章节图片、评论请求或同站链接。
-  function installPopupGuard() {
-    const original = page.open;
-    if (typeof original !== 'function') return;
-    const wrapped = function (...args) {
-      const raw = args[0] == null ? '' : String(args[0]);
-      const u = urlOf(raw);
-      const sameSite = u && /^https?:$/.test(u.protocol) && (u.hostname === 'rawinu.com' || u.hostname.endsWith('.rawinu.com'));
-      const direct = lastDirectLink && Date.now() - lastDirectLink.time < 1200 && u?.href === lastDirectLink.href;
-      const blocked = config.enabled && (isAdURL(raw) || (config.strictPopups && (!raw || !sameSite) && !direct));
-      if (blocked) {
-        popupCount++;
-        log('弹窗', u?.hostname || '空白窗口'); updateUI();
-        return null;
-      }
-      return Reflect.apply(original, page, args);
-    };
-    try { page.open = wrapped; popupHookOK = page.open === wrapped; }
-    catch { popupHookOK = false; }
+  // 当前广告借用空白 iframe 的 open，或提交隐藏表单，绕过顶层 open。
+  // 同源 iframe 在交给调用者前装好保护；不读取跨域框、不替换网络请求。
+  const guardedRealms = new WeakSet();
+  function sameSiteURL(u) {
+    return u && /^https?:$/.test(u.protocol) && (u.hostname === 'rawinu.com' || u.hostname.endsWith('.rawinu.com'));
   }
-  installPopupGuard();
+  function blockPopup(raw, kind = '弹窗') {
+    const u = urlOf(raw);
+    const direct = lastDirectLink && Date.now() - lastDirectLink.time < 1200 && u?.href === lastDirectLink.href;
+    if (!config.enabled || !(isAdURL(raw) || (config.strictPopups && (!raw || !sameSiteURL(u)) && !direct))) return false;
+    popupCount++; log(kind, u?.hostname || '空白窗口'); updateUI(); return true;
+  }
+  function blockForm(form) {
+    if (!config.enabled) return false;
+    let concealed = false;
+    for (let el = form; el; el = el.parentElement) {
+      const css = el.ownerDocument.defaultView.getComputedStyle(el);
+      if (el.hidden || css.display === 'none' || css.visibility === 'hidden') { concealed = true; break; }
+    }
+    // 保留正常可见表单和同站评论；隐藏站外表单是已确认的广告弹窗后备通道。
+    return (isAdURL(form.action) || concealed) && blockPopup(form.action, '广告表单');
+  }
+  function installRealmGuards(win) {
+    try {
+      // 以 Document 标识：iframe 导航后的 WindowProxy 相同，但 Document 会改变。
+      const doc = win.document;
+      if (!doc || guardedRealms.has(doc)) return;
+      guardedRealms.add(doc);
+      const original = win.open;
+      const wrapped = function (...args) {
+        const raw = args[0] == null ? '' : String(args[0]);
+        if (blockPopup(raw)) return null;
+        return Reflect.apply(original, this == null ? win : this, args);
+      };
+      win.open = wrapped;
+      if (win === page) popupHookOK = win.open === wrapped;
+      const fp = win.HTMLFormElement.prototype;
+      for (const method of ['submit', 'requestSubmit']) {
+        const native = fp[method];
+        if (typeof native !== 'function') continue;
+        fp[method] = function (...args) {
+          if (blockForm(this)) return;
+          return Reflect.apply(native, this, args);
+        };
+      }
+      doc.addEventListener('submit', e => {
+        if (e.target instanceof win.HTMLFormElement && blockForm(e.target)) {
+          e.preventDefault(); e.stopImmediatePropagation();
+        }
+      }, true);
+      const ip = win.HTMLIFrameElement.prototype;
+      for (const property of ['contentWindow', 'contentDocument']) {
+        const descriptor = Object.getOwnPropertyDescriptor(ip, property);
+        if (!descriptor?.get || !descriptor.configurable) continue;
+        Object.defineProperty(ip, property, { ...descriptor, get() {
+          const value = Reflect.apply(descriptor.get, this, []);
+          if (value) installRealmGuards(property === 'contentWindow' ? value : value.defaultView);
+          return value;
+        } });
+      }
+    } catch { /* 浏览器拒绝访问的跨域或沙箱框保持原样。 */ }
+  }
+  installRealmGuards(page);
   function onActivation(e) {
     if (!config.enabled || e.composedPath().includes(host)) return;
     if (pick) {
