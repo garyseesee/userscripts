@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.0.1
+// @version      1.0.2
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -25,7 +25,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const KEY = `rawinu-cleaner:v1:${location.hostname}`;
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
@@ -47,6 +47,8 @@
     'popads.net', 'popcash.net', 'exoclick.com',
   ];
   const BUILTIN = [
+    // 当前三路广告脚本共用的悬浮层根节点；包含通知、宝箱、礼物及插屏。
+    '[data-shb="1"]',
     '.ad-sandbox-container', 'ins.adsbygoogle', '[data-ad-slot]',
     '[id^="google_ads_iframe"]', '[id^="div-gpt-ad"]',
     '.ad-container', '.ad-slot', '.advertisement',
@@ -216,7 +218,7 @@
     }
   });
   observer.observe(document, { subtree: true, childList: true, attributes: true,
-    attributeFilter: ['class', 'id', 'src', 'srcdoc', 'href', 'style', 'data-src', 'data-ad-slot', MARK] });
+    attributeFilter: ['class', 'id', 'src', 'srcdoc', 'href', 'style', 'data-src', 'data-ad-slot', 'data-shb', MARK] });
   ensureStyle();
 
   // 必须写入页面的 window，才能拦截页面脚本的 window.open。
