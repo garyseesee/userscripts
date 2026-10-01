@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.1.0
+// @version      1.1.1
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -27,7 +27,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
   const SITE_NAME = SITE_DOMAIN === 'nihonkuni.com' ? 'NihonKuni' : 'RawINU';
@@ -61,7 +61,11 @@
     '.ad-sandbox-container', 'ins.adsbygoogle', '[data-ad-slot]',
     '[id^="google_ads_iframe"]', '[id^="div-gpt-ad"]',
     '.ad-container', '.ad-slot', '.advertisement',
-    ...(SITE_DOMAIN === 'nihonkuni.com' ? ['.ad-placeholder', 'ins[id="1127812"]'] : []),
+    ...(SITE_DOMAIN === 'nihonkuni.com' ? [
+      '.ad-placeholder', 'ins[id="1127812"]',
+      // 实际元素检查确认的嵌套 Criteo 横幅外层；内层框没有顶层可见 src。
+      '.st-intop-slot', '.st-placement', '.st-adunit', 'iframe.st-standard-ads-sandbox',
+    ] : []),
   ];
   const PROTECTED = 'html,body,head,main,nav,header,footer,form,#chapter-images,.chapter-content,.chapter-img,.img-wrapper,.chapter-images,.chapter-image-wrapper,.reading-content,.reading-controls-wrapper,.reading-header';
   const CANDIDATES = [...BUILTIN, 'iframe', 'img[src]', 'img[data-src]', 'a[href]'].join(',');
