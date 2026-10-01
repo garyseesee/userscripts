@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.0.4
+// @version      1.1.0
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
-// @description  清理广告框、限制广告弹窗；点选漏网广告后记住规则，支持撤销和暂停。
+// @description  支持 RawINU 与 NihonKuni：清理广告框、限制广告弹窗，点选记忆、撤销和暂停。
 // @match        *://rawinu.com/*
 // @match        *://*.rawinu.com/*
+// @match        *://nihonkuni.com/*
+// @match        *://*.nihonkuni.com/*
 // @run-at       document-start
 // @sandbox      JavaScript
 // @noframes
@@ -25,7 +27,10 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.0.4';
+  const VERSION = '1.1.0';
+  const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
+  if (!SITE_DOMAIN) return;
+  const SITE_NAME = SITE_DOMAIN === 'nihonkuni.com' ? 'NihonKuni' : 'RawINU';
   const KEY = `rawinu-cleaner:v1:${location.hostname}`;
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
@@ -44,6 +49,9 @@
     'arsonojuncoes.com', 'nuancedmorosis.com', 'olivedrawer.com',
     'cabretpardao.com', 'zipcrypticbroadsheet.com',
     'cuculireactor.qpon',
+    // 2026-10-01 NihonKuni 源码与实际广告框中确认的来源。
+    'cryoselarolla.com', 'hameltnoummos.com', 'broadlyjukeboxunrevised.com',
+    'jads.co', 'criteo.com', 'adeqmedia.com',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
     'popads.net', 'popcash.net', 'exoclick.com',
   ];
@@ -53,8 +61,9 @@
     '.ad-sandbox-container', 'ins.adsbygoogle', '[data-ad-slot]',
     '[id^="google_ads_iframe"]', '[id^="div-gpt-ad"]',
     '.ad-container', '.ad-slot', '.advertisement',
+    ...(SITE_DOMAIN === 'nihonkuni.com' ? ['.ad-placeholder', 'ins[id="1127812"]'] : []),
   ];
-  const PROTECTED = 'html,body,head,main,nav,header,footer,form,#chapter-images,.chapter-content,.chapter-img,.img-wrapper';
+  const PROTECTED = 'html,body,head,main,nav,header,footer,form,#chapter-images,.chapter-content,.chapter-img,.img-wrapper,.chapter-images,.chapter-image-wrapper,.reading-content,.reading-controls-wrapper,.reading-header';
   const CANDIDATES = [...BUILTIN, 'iframe', 'img[src]', 'img[data-src]', 'a[href]'].join(',');
   const hidden = new Map();
   const frameStates = new Map();
@@ -226,7 +235,7 @@
   // 同源 iframe 在交给调用者前装好保护；不读取跨域框、不替换网络请求。
   const guardedRealms = new WeakSet();
   function sameSiteURL(u) {
-    return u && /^https?:$/.test(u.protocol) && (u.hostname === 'rawinu.com' || u.hostname.endsWith('.rawinu.com'));
+    return u && /^https?:$/.test(u.protocol) && (u.hostname === SITE_DOMAIN || u.hostname.endsWith(`.${SITE_DOMAIN}`));
   }
   function blockPopup(raw, kind = '弹窗') {
     const u = urlOf(raw);
@@ -364,7 +373,7 @@
     css.textContent = `:host{color-scheme:light}*{box-sizing:border-box}button{font:13px/1.5 system-ui,sans-serif;cursor:pointer;border:1px solid #cbd5e1;border-radius:7px;padding:7px 10px;background:#fff;color:#172033;text-align:left}button:hover{background:#eef4ff}#badge{position:relative;z-index:3;background:#172033;color:white;border:0;box-shadow:0 2px 14px #0003}#panel{position:relative;z-index:3;width:295px;max-width:90vw;max-height:72vh;overflow:auto;background:#fff;color:#172033;border:1px solid #cbd5e1;border-radius:12px;padding:12px;margin-bottom:8px;font:13px/1.6 system-ui,sans-serif;box-shadow:0 5px 22px #0003}#panel[hidden]{display:none}h3{font-size:15px;margin:0 0 7px}.buttons{display:grid;gap:6px}p{margin:8px 0 0;overflow-wrap:anywhere}#hint{color:#475569}#frame{display:none;pointer-events:none;position:fixed;border:3px solid #f43f5e;background:#f43f5e18;z-index:2}#shield{display:none;position:fixed;inset:0;z-index:1;cursor:crosshair;background:transparent}`;
     shadow.append(css);
     details = document.createElement('section'); details.id = 'panel'; details.hidden = true;
-    const title = document.createElement('h3'); title.textContent = `RawINU 广告清理 v${VERSION}`; details.append(title);
+    const title = document.createElement('h3'); title.textContent = `${SITE_NAME} 广告清理 v${VERSION}`; details.append(title);
     statusNode = document.createElement('p'); details.append(statusNode);
     const group = document.createElement('div'); group.className = 'buttons'; details.append(group);
     const add = (text, fn, id) => { const b = button(text, fn); if (id) b.id = id; group.append(b); };
