@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.1.2
+// @version      1.2.0
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
-// @description  支持 RawINU 与 NihonKuni：清理广告框、限制广告弹窗，点选记忆、撤销和暂停。
+// @description  支持 RawINU 与 NihonKuni：清理广告框、限制弹窗和当前页自动外跳，点选记忆、撤销和暂停。
 // @match        *://rawinu.com/*
 // @match        *://*.rawinu.com/*
 // @match        *://nihonkuni.com/*
@@ -27,7 +27,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.1.2';
+  const VERSION = '1.2.0';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
   const SITE_NAME = SITE_DOMAIN === 'nihonkuni.com' ? 'NihonKuni' : 'RawINU';
@@ -35,12 +35,13 @@
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
   const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
-  const defaults = { enabled: true, strictPopups: true, rules: [] };
+  const defaults = { enabled: true, strictPopups: true, blockRedirects: true, rules: [] };
   let saved;
   try { saved = GM_getValue(KEY, defaults); } catch { saved = defaults; }
   const config = {
     enabled: saved?.enabled !== false,
     strictPopups: saved?.strictPopups !== false,
+    blockRedirects: saved?.blockRedirects !== false,
     rules: Array.isArray(saved?.rules) ? saved.rules.filter(validRule).slice(-100) : [],
   };
 
@@ -52,6 +53,8 @@
     // 2026-10-01 NihonKuni 源码与实际广告框中确认的来源。
     'cryoselarolla.com', 'hameltnoummos.com', 'broadlyjukeboxunrevised.com',
     'jads.co', 'criteo.com', 'adeqmedia.com',
+    // 2026-10-04 章节引用的广告脚本包含 mouseout 后直接修改 location 的逻辑。
+    'wienerschumar.com',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
     'popads.net', 'popcash.net', 'exoclick.com',
   ];
@@ -78,7 +81,8 @@
   const pending = new Set();
   let timer = null, host, shadow, statusNode, details, hint, frame, shield;
   let hiddenStyle, pick = null, popupCount = 0, rejectedLinks = 0, popupHookOK = false;
-  let expanded = false, lastDirectLink = null;
+  let expanded = false, lastDirectLink = null, navigationIntent = null;
+  let redirectCount = 0, navigationHookOK = false;
 
   function validRule(rule) {
     if (!rule || !['selector', 'resource'].includes(rule.kind)) return false;
@@ -243,6 +247,53 @@
   function sameSiteURL(u) {
     return u && /^https?:$/.test(u.protocol) && (u.hostname === SITE_DOMAIN || u.hostname.endsWith(`.${SITE_DOMAIN}`));
   }
+  function rememberNavigationIntent(e) {
+    // 只有真实的链接点击或表单操作能放行对应地址；鼠标移出和模拟 click 不算。
+    if (!e.isTrusted || (e.type === 'keydown' && e.key !== 'Enter')) return;
+    navigationIntent = null;
+    if (!config.enabled || pick) return;
+    const target = e.composedPath().find(n => n?.nodeType === 1);
+    if (!target) return;
+    const link = e.type === 'click' && target.closest('a[href],area[href]');
+    let raw = link?.href;
+    let sourceForm = null;
+    if (!raw) {
+      const control = target.closest('button,input,select');
+      const submitter = control && ((control.localName === 'button' && control.type === 'submit') ||
+        (control.localName === 'input' && ['submit', 'image'].includes(control.type)));
+      if (control?.form && (submitter || (e.type === 'keydown' && control.localName === 'input'))) {
+        raw = submitter && control.hasAttribute('formaction') ? control.formAction : control.form.action;
+        sourceForm = control.form;
+      }
+    }
+    const u = raw && urlOf(raw);
+    if (u && !isAdURL(u.href)) navigationIntent = { href: u.href, form: sourceForm, action: u.origin + u.pathname, time: Date.now() };
+  }
+  function installNavigationGuard() {
+    // Location 的属性不能可靠重写。使用 Chrome 的导航事件，在离开当前页前取消。
+    // 跨域导航不能 intercept()，但 cancelable 为 true 时可以 preventDefault()。
+    try {
+      if (typeof page.navigation?.addEventListener !== 'function') return;
+      page.navigation.addEventListener('navigate', e => {
+        if (!config.enabled || !config.blockRedirects || !e.cancelable || e.defaultPrevented ||
+            ['reload', 'traverse'].includes(e.navigationType)) return;
+        const u = e.destination?.url && urlOf(e.destination.url);
+        if (!u || sameSiteURL(u)) return;
+        const intent = navigationIntent;
+        const submittedForm = intent?.form && (e.sourceElement === intent.form || e.sourceElement?.form === intent.form);
+        const direct = intent && Date.now() - intent.time < 1200 &&
+          (submittedForm ? intent.action === u.origin + u.pathname : !intent.form && intent.href === u.href);
+        if (direct && !isAdURL(u.href)) { navigationIntent = null; return; }
+        e.preventDefault();
+        if (e.defaultPrevented) {
+          redirectCount++; log('阻止自动外跳', u.hostname || u.protocol); updateUI();
+          tell('已阻止网页自动跳到站外，继续保留当前阅读位置。');
+        }
+      }, { capture: true });
+      navigationHookOK = true;
+    } catch { /* 无此能力时明确显示，不以弹窗提示或循环后退困住用户。 */ }
+  }
+  installNavigationGuard();
   function blockPopup(raw, kind = '弹窗') {
     const u = urlOf(raw);
     const direct = lastDirectLink && Date.now() - lastDirectLink.time < 1200 && u?.href === lastDirectLink.href;
@@ -265,6 +316,8 @@
       const doc = win.document;
       if (!doc || guardedRealms.has(doc)) return;
       guardedRealms.add(doc);
+      win.addEventListener('click', rememberNavigationIntent, true);
+      win.addEventListener('keydown', rememberNavigationIntent, true);
       const original = win.open;
       const wrapped = function (...args) {
         const raw = args[0] == null ? '' : String(args[0]);
@@ -341,16 +394,17 @@
   }
   function updateUI() {
     if (!statusNode) return;
-    statusNode.textContent = `${config.enabled ? '清理中' : '已暂停'} · 隐藏 ${[...hidden.keys()].filter(e => e.isConnected).length} · 弹窗 ${popupCount}`;
+    statusNode.textContent = `${config.enabled ? '清理中' : '已暂停'} · 隐藏 ${[...hidden.keys()].filter(e => e.isConnected).length} · 弹窗 ${popupCount} · 外跳 ${redirectCount}`;
     shadow.getElementById('toggle').textContent = config.enabled ? '暂停并恢复页面' : '恢复清理';
     shadow.getElementById('strict').textContent = `限制站外脚本弹窗：${config.strictPopups ? '开' : '关'}`;
+    shadow.getElementById('redirects').textContent = `阻止自动外跳：${navigationHookOK ? (config.blockRedirects ? '开' : '关') : '浏览器不支持'}`;
     shadow.getElementById('rules').textContent = `已记住 ${config.rules.length} 条规则 · 阻止广告链接 ${rejectedLinks} 次`;
   }
   function setEnabled() {
     config.enabled = !config.enabled;
     stopPick();
     if (!config.enabled) { [...hidden.keys()].forEach(restore); syncFrames(); } else queue();
-    persist(); tell(config.enabled ? '已恢复清理。' : '已恢复被隐藏的元素，弹窗限制也已暂停。');
+    persist(); tell(config.enabled ? '已恢复清理。' : '已恢复被隐藏的元素，弹窗和外跳限制也已暂停。');
   }
   function undo() {
     const rule = config.rules.pop();
@@ -365,6 +419,7 @@
     }));
     const data = { version: VERSION, host: location.hostname, pageType: /chapter/i.test(location.pathname) ? 'chapter' : 'other',
       enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups,
+      navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
       savedRules: config.rules.length, hidden: hidden.size, popupCount, frames, events };
     const text = JSON.stringify(data, null, 2);
     try { GM_setClipboard(text, 'text'); tell('诊断信息已复制。可粘贴给我继续改进；不含网页正文。'); }
@@ -391,6 +446,7 @@
     add('撤销最后一条规则', undo);
     add('暂停并恢复页面', setEnabled, 'toggle');
     add('限制站外脚本弹窗：开', () => { config.strictPopups = !config.strictPopups; persist(); }, 'strict');
+    add('阻止自动外跳：开', () => { config.blockRedirects = !config.blockRedirects; navigationIntent = null; persist(); }, 'redirects');
     add('重新扫描', () => { queue(); tell('已安排重新扫描。'); });
     add('复制诊断信息', report);
     const ruleInfo = document.createElement('p'); ruleInfo.id = 'rules'; details.append(ruleInfo);
