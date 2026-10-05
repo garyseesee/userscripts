@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.2.0
+// @version      1.2.1
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -27,7 +27,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
   const SITE_NAME = SITE_DOMAIN === 'nihonkuni.com' ? 'NihonKuni' : 'RawINU';
@@ -55,6 +55,8 @@
     'jads.co', 'criteo.com', 'adeqmedia.com',
     // 2026-10-04 章节引用的广告脚本包含 mouseout 后直接修改 location 的逻辑。
     'wienerschumar.com',
+    // 2026-10-05 用户反馈：点下一章后新开此广告落地页。
+    'valuemedia-ltd.com',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
     'popads.net', 'popcash.net', 'exoclick.com',
   ];
@@ -353,6 +355,25 @@
     } catch { /* 浏览器拒绝访问的跨域或沙箱框保持原样。 */ }
   }
   installRealmGuards(page);
+  function isChapterLink(el) {
+    // 只保护已确认的翻页控件及同一作品的直达章节链接。
+    // 不拦评论、章节选择框等依赖站点 JavaScript 的操作。
+    if (SITE_DOMAIN !== 'rawinu.com') return false;
+    const selector = '#rd-side_icon a.rd_top-left, #rd-side_icon a.rd_top-right, .input-group > .prev > a, .input-group > .next > a';
+    if (!el.matches(selector) || el.hasAttribute('download')) return false;
+    const u = urlOf(el.href);
+    if (!u || u.origin !== location.origin || u.search || u.hash) return false;
+    const pattern = /^\/(?:unir|read)-(.+)-chapter-\d+(?:\.\d+)*\.html$/;
+    const current = location.pathname.match(pattern);
+    const next = u.pathname.match(pattern);
+    return !!current && !!next && current[1] === next[1];
+  }
+  function protectChapterKey(e) {
+    if (!config.enabled || !config.strictPopups || pick || e.key !== 'Enter') return;
+    const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
+    if (el && isChapterLink(el)) e.stopImmediatePropagation();
+  }
+  for (const type of ['keydown', 'keyup']) window.addEventListener(type, protectChapterKey, true);
   function onActivation(e) {
     if (e.composedPath().includes(host)) {
       // 网页的全局捕获监听器会吞掉点击。只转发本脚本封闭面板内的点击，
@@ -382,6 +403,12 @@
       return;
     }
     if (e.isTrusted && (e.type === 'click' || e.type === 'auxclick')) lastDirectLink = { href: el.href, time: Date.now() };
+    if (config.strictPopups && isChapterLink(el)) {
+      // 在 window 捕获阶段隔离按下、松开和点击，广告不能借此次手势另开标签。
+      // 不 preventDefault、不改写 href/target，也不模拟点击；由浏览器完成原生翻页，
+      // 保留 Cmd/Ctrl 点击、中键与键盘 Enter 的默认行为。
+      e.stopImmediatePropagation();
+    }
   }
   for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'auxclick']) {
     window.addEventListener(type, onActivation, { capture: true, passive: false });
