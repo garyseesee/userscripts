@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.2.1
+// @version      1.2.2
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -27,7 +27,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.2.1';
+  const VERSION = '1.2.2';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
   const SITE_NAME = SITE_DOMAIN === 'nihonkuni.com' ? 'NihonKuni' : 'RawINU';
@@ -129,11 +129,16 @@
     }
     return el.localName === rule.tag && resourceKey(resourceOf(el)) === rule.value;
   }
+  function knownReasonFor(el) {
+    if (el.matches(BUILTIN.join(','))) return '广告容器';
+    if (['iframe', 'img', 'a'].includes(el.localName) && resourceOf(el) && isAdURL(resourceOf(el))) return '已知广告来源';
+    return null;
+  }
   function reasonFor(el) {
     if (protectedElement(el)) return null;
     if (temporary.has(el)) return '本页临时选择';
-    if (el.matches(BUILTIN.join(','))) return '广告容器';
-    if (['iframe', 'img', 'a'].includes(el.localName) && resourceOf(el) && isAdURL(resourceOf(el))) return '已知广告来源';
+    const known = knownReasonFor(el);
+    if (known) return known;
     const srcdoc = frameStates.has(el) ? frameStates.get(el).srcdoc : el.getAttribute('srcdoc');
     if (el.localName === 'iframe' && srcdoc) {
       // 只检查嵌入 HTML 的实际资源 URL，不因正文提到域名就误判。
@@ -185,6 +190,19 @@
     if (root.nodeType === 1 && root.matches(selector)) fn(root);
     root.querySelectorAll?.(selector).forEach(fn);
   }
+  function hideKnown(root, subtree = true) {
+    if (!config.enabled || own(root)) return;
+    const inspect = el => {
+      if (protectedElement(el)) return;
+      const why = knownReasonFor(el);
+      // 已隐藏元素的样式修复留给批处理，避免与站点的样式观察器反复互相触发。
+      if (why && !hidden.has(el)) hide(el, why);
+    };
+    // 只做轻量识别和隐藏，不解析 srcdoc、不遍历自定义规则、不停用框架。
+    // MutationObserver 回调内完成，避免已知广告再等待 100ms 批处理后才消失。
+    if (subtree) visit(root, CANDIDATES, inspect);
+    else if (root.nodeType === 1) inspect(root);
+  }
   function scan(root = document) {
     if (!config.enabled || own(root)) return;
     const inspect = el => {
@@ -231,10 +249,11 @@
         const old = frameStates.get(r.target);
         if (old && r.attributeName === 'src' && r.target.getAttribute('src') !== 'about:blank') old.src = r.target.getAttribute('src');
         if (old && r.attributeName === 'srcdoc' && r.target.hasAttribute('srcdoc')) old.srcdoc = r.target.getAttribute('srcdoc');
+        hideKnown(r.target, false);
         queue(r.target);
       }
       else {
-        r.addedNodes.forEach(n => { if (n.nodeType === 1) queue(n); });
+        r.addedNodes.forEach(n => { if (n.nodeType === 1) { hideKnown(n); queue(n); } });
         if (r.removedNodes.length) queue(r.target);
       }
     }
@@ -242,6 +261,8 @@
   observer.observe(document, { subtree: true, childList: true, attributes: true,
     attributeFilter: ['class', 'id', 'src', 'srcdoc', 'href', 'style', 'data-src', 'data-ad-slot', 'data-shb', MARK] });
   ensureStyle();
+  // 兼容脚本启动时页面已存在内容的情况；详细扫描仍保留批处理。
+  hideKnown(document);
 
   // 当前广告借用空白 iframe 的 open，或提交隐藏表单，绕过顶层 open。
   // 同源 iframe 在交给调用者前装好保护；不读取跨域框、不替换网络请求。
