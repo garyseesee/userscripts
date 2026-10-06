@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.2.2
+// @version      1.2.3
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -27,7 +27,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.2.2';
+  const VERSION = '1.2.3';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
   const SITE_NAME = SITE_DOMAIN === 'nihonkuni.com' ? 'NihonKuni' : 'RawINU';
@@ -82,7 +82,7 @@
   const events = [];
   const pending = new Set();
   let timer = null, host, shadow, statusNode, details, hint, frame, shield;
-  let hiddenStyle, pick = null, popupCount = 0, rejectedLinks = 0, popupHookOK = false;
+  let hiddenStyle, stylePath, styleText, pick = null, popupCount = 0, rejectedLinks = 0, popupHookOK = false;
   let expanded = false, lastDirectLink = null, navigationIntent = null;
   let redirectCount = 0, navigationHookOK = false;
 
@@ -96,6 +96,7 @@
   function persist() {
     try { GM_setValue(KEY, config); }
     catch { tell('保存失败：本次生效，但关闭页面后可能丢失。'); }
+    ensureStyle(true);
     updateUI();
   }
   function log(kind, detail) {
@@ -226,6 +227,7 @@
   }
   function queue(root = document) {
     if (!config.enabled || own(root)) return;
+    ensureStyle();
     pending.add(root);
     if (timer !== null) return;
     timer = setTimeout(() => {
@@ -235,11 +237,24 @@
       else for (const r of roots) if (r.isConnected) scan(r);
     }, 100);
   }
-  function ensureStyle() {
-    if (!document.documentElement || hiddenStyle?.isConnected) return;
-    hiddenStyle = document.createElement('style');
-    hiddenStyle.textContent = `[${MARK}="1"] { display: none !important; }`;
-    (document.head || document.documentElement).append(hiddenStyle);
+  function ensureStyle(refresh = false) {
+    if (!document.documentElement) return;
+    if (refresh || stylePath !== location.pathname) {
+      stylePath = location.pathname;
+      styleText = `[${MARK}="1"] { display: none !important; }`;
+      if (config.enabled) {
+        // 先放入已知广告及当前路径的记忆规则，元素出现时由 CSS 直接隐藏。
+        // 同样排除阅读区、表单、面板及包含这些内容的祖先；不隐藏整页等待扫描。
+        const selectors = [...BUILTIN, ...config.rules.filter(r => r.kind === 'selector' && activeRule(r)).map(r => r.value)];
+        const protectedSelectors = `${PROTECTED},#${UI}`;
+        styleText += `\n:is(${selectors.join(',')}):not(${protectedSelectors}):not(:has(${protectedSelectors})) { display: none !important; }`;
+      }
+    }
+    if (!hiddenStyle?.isConnected) {
+      hiddenStyle = document.createElement('style');
+      hiddenStyle.textContent = styleText;
+      (document.head || document.documentElement).append(hiddenStyle);
+    } else if (hiddenStyle.textContent !== styleText) hiddenStyle.textContent = styleText;
   }
   const observer = new MutationObserver(records => {
     ensureStyle();
