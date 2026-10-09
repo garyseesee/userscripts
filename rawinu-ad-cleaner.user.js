@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.2.6
+// @version      1.2.7
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -28,7 +28,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.2.6';
+  const VERSION = '1.2.7';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -420,7 +420,18 @@
     return u.searchParams.getAll('listType').length === 1 && u.searchParams.get('listType') === 'pagination' &&
       u.searchParams.getAll('page').length === 1 && /^[1-9]\d*$/.test(u.searchParams.get('page') || '');
   }
-  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el); }
+  function isDirectoryChapterLink(el) {
+    // 2026-10-10 实际作品页：目录通过 XHR 插入，a 包住 li/章节名称；另有阅读按钮。
+    // 每次事件现场判断，覆盖新插入、排序、替换后的链接，不依赖初次扫描。
+    if (SITE_DOMAIN !== 'rawinu.com' || el.hasAttribute('download') ||
+        !el.matches('#list-chapter ul.list-chapters > a[href], #bt-reading.read-action > a[href]')) return false;
+    const current = location.pathname.match(/^\/manga-(.+)\.html$/);
+    const u = urlOf(el.href);
+    if (!current || !u || u.origin !== location.origin || u.search || u.hash) return false;
+    const next = u.pathname.match(/^\/(?:unir|read)-(.+)-chapter-\d+(?:\.\d+)*\.html$/);
+    return !!next && current[1] === next[1];
+  }
+  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el); }
   function protectNavigationKey(e) {
     if (!config.enabled || !config.strictPopups || pick || e.key !== 'Enter') return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
