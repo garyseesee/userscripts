@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.2.5
+// @version      1.2.6
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -28,7 +28,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.2.5';
+  const VERSION = '1.2.6';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -410,12 +410,23 @@
     const next = u.pathname.match(pattern);
     return !!current && !!next && current[1] === next[1];
   }
-  function protectChapterKey(e) {
+  function isListPageLink(el) {
+    // 2026-10-10 实际列表页：页码与 «/» 均为原生链接，筛选条件保存在 query 中。
+    // 仅隔离已确认的分页区；不影响搜索表单、排序按钮或依赖 JS 的其它控件。
+    if (SITE_DOMAIN !== 'rawinu.com' || location.pathname !== '/manga-list.html' ||
+        !el.matches('ul.pagination.pagination-v4 > li > a[href]') || el.hasAttribute('download')) return false;
+    const u = urlOf(el.href);
+    if (!u || u.origin !== location.origin || u.pathname !== '/manga-list.html' || u.hash) return false;
+    return u.searchParams.getAll('listType').length === 1 && u.searchParams.get('listType') === 'pagination' &&
+      u.searchParams.getAll('page').length === 1 && /^[1-9]\d*$/.test(u.searchParams.get('page') || '');
+  }
+  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el); }
+  function protectNavigationKey(e) {
     if (!config.enabled || !config.strictPopups || pick || e.key !== 'Enter') return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
-    if (el && isChapterLink(el)) e.stopImmediatePropagation();
+    if (el && isProtectedNavigationLink(el)) e.stopImmediatePropagation();
   }
-  for (const type of ['keydown', 'keyup']) window.addEventListener(type, protectChapterKey, true);
+  for (const type of ['keydown', 'keyup']) window.addEventListener(type, protectNavigationKey, true);
   function onActivation(e) {
     if (e.composedPath().includes(host)) {
       // 网页的全局捕获监听器会吞掉点击。只转发本脚本封闭面板内的点击，
@@ -445,7 +456,7 @@
       return;
     }
     if (e.isTrusted && (e.type === 'click' || e.type === 'auxclick')) lastDirectLink = { href: el.href, time: Date.now() };
-    if (config.strictPopups && isChapterLink(el)) {
+    if (config.strictPopups && isProtectedNavigationLink(el)) {
       // 在 window 捕获阶段隔离按下、松开和点击，广告不能借此次手势另开标签。
       // 不 preventDefault、不改写 href/target，也不模拟点击；由浏览器完成原生翻页，
       // 保留 Cmd/Ctrl 点击、中键与键盘 Enter 的默认行为。
