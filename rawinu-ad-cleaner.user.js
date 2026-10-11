@@ -1,16 +1,18 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.2.7
+// @version      1.3.0
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
-// @description  支持 RawINU 与 NihonKuni：清理广告框、限制弹窗和当前页自动外跳，点选记忆、撤销和暂停。
+// @description  支持 RawINU、NihonKuni 与 yts-official.biz：清理广告框、限制弹窗和当前页自动外跳，点选记忆、撤销和暂停。
 // @match        *://rawinu.com/*
 // @match        *://*.rawinu.com/*
 // @match        *://nihonkuni.com/*
 // @match        *://*.nihonkuni.com/*
+// @match        *://yts-official.biz/*
+// @match        *://*.yts-official.biz/*
 // @run-at       document-start
 // @sandbox      JavaScript
 // @noframes
@@ -28,11 +30,11 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.2.7';
+  const VERSION = '1.3.0';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
-  const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
+  const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
-  const SITE_NAME = SITE_DOMAIN === 'nihonkuni.com' ? 'NihonKuni' : 'RawINU';
+  const SITE_NAME = { 'rawinu.com': 'RawINU', 'nihonkuni.com': 'NihonKuni', 'yts-official.biz': 'YTS' }[SITE_DOMAIN];
   const KEY = `rawinu-cleaner:v1:${location.hostname}`;
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
@@ -61,6 +63,8 @@
     'valuemedia-ltd.com',
     // 2026-10-08 RawINU 首页 1XBET：广告 iframe 与透明点击层共用的来源。
     'traffmovie.com',
+    // 2026-10-11 YTS 实际页面引用的点击广告、悬浮广告脚本及广告框图片来源。
+    'sovransbraws.com', 'desaltssakers.com', 'quantedmesquin.qpon',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
     'popads.net', 'popcash.net', 'exoclick.com',
   ];
@@ -431,13 +435,47 @@
     const next = u.pathname.match(/^\/(?:unir|read)-(.+)-chapter-\d+(?:\.\d+)*\.html$/);
     return !!next && current[1] === next[1];
   }
-  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el); }
+  function isYtsBrowseLink(el) {
+    // 实测浏览页的页码和影片封面/标题均为原生链接；不接管播放、下载或其它功能。
+    if (SITE_DOMAIN !== 'yts-official.biz' || !/^\/browse-movies\/?$/.test(location.pathname) || el.hasAttribute('download')) return false;
+    const u = urlOf(el.href);
+    if (!u || u.origin !== location.origin || u.hash) return false;
+    if (el.matches('ul.tsc_pagination > li > a[href]')) {
+      return /^\/browse-movies\/?$/.test(u.pathname) && u.searchParams.getAll('page').length === 1 &&
+        /^[1-9]\d*$/.test(u.searchParams.get('page') || '');
+    }
+    return !u.search && /^\/movies\/[a-z0-9-]+\/$/i.test(u.pathname) &&
+      el.matches('.browse-movie-wrap a.browse-movie-link[href], .browse-movie-wrap a.browse-movie-title[href]');
+  }
+  function isYtsSearchForm(form, submitter = null) {
+    if (SITE_DOMAIN !== 'yts-official.biz' || !(form instanceof Element) || !form.matches('form') ||
+        !form.querySelector('input[type="search"][name="keyword"]')) return false;
+    // 只隔离已检查的快速搜索、桌面搜索及移动端搜索表单。
+    if (!(form.id === 'quick-search' || (/^\/browse-movies\/?$/.test(location.pathname) &&
+        form.querySelector('#main-search-fields, .input-group.container.search-query')))) return false;
+    const u = urlOf(submitter?.hasAttribute('formaction') ? submitter.formAction : form.action);
+    const method = submitter?.hasAttribute('formmethod') ? submitter.formMethod : form.method;
+    return String(method).toLowerCase() === 'get' && !!u && u.origin === location.origin &&
+      u.pathname === '/browse-movies' && !u.search && !u.hash;
+  }
+  function isYtsSearchControl(target) {
+    const control = target.closest('input,button,select');
+    if (!control || !isYtsSearchForm(control.form, control)) return false;
+    return control.matches('input[type="search"][name="keyword"], input[type="submit"], button[type="submit"], select');
+  }
+  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el) || isYtsBrowseLink(el); }
   function protectNavigationKey(e) {
     if (!config.enabled || !config.strictPopups || pick || e.key !== 'Enter') return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
-    if (el && isProtectedNavigationLink(el)) e.stopImmediatePropagation();
+    if ((el && isProtectedNavigationLink(el)) || (e.target instanceof Element && isYtsSearchControl(e.target))) e.stopImmediatePropagation();
   }
   for (const type of ['keydown', 'keyup']) window.addEventListener(type, protectNavigationKey, true);
+  window.addEventListener('submit', e => {
+    if (config.enabled && config.strictPopups && !pick && isYtsSearchForm(e.target, e.submitter)) {
+      // 原生 GET 提交保留当前关键字和全部筛选值；不手工拼 URL，也不模拟提交。
+      e.stopImmediatePropagation();
+    }
+  }, true);
   function onActivation(e) {
     if (e.composedPath().includes(host)) {
       // 网页的全局捕获监听器会吞掉点击。只转发本脚本封闭面板内的点击，
@@ -460,7 +498,10 @@
       e.preventDefault(); e.stopImmediatePropagation(); return;
     }
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
-    if (!el) return;
+    if (!el) {
+      if (config.strictPopups && e.target instanceof Element && isYtsSearchControl(e.target)) e.stopImmediatePropagation();
+      return;
+    }
     if (isAdURL(el.href)) {
       e.preventDefault(); e.stopImmediatePropagation();
       if (e.type === 'click' || e.type === 'auxclick') { rejectedLinks++; updateUI(); }
@@ -486,7 +527,7 @@
       // 仅在主动点击时打开固定仓库地址；时间参数减少旧源码缓存，不包含当前网页信息。
       url.searchParams.set('_update', String(Date.now()));
       GM_openInTab(url.href, { active: true, setParent: true });
-      tell(`已打开更新入口。在油猴页面确认更新后，返回漫画页刷新；本页仍运行 v${VERSION}。`);
+      tell(`已打开更新入口。在油猴页面确认更新后，返回网页刷新；本页仍运行 v${VERSION}。`);
     } catch {
       tell('无法打开更新入口。请在 Chrome 的油猴菜单中检查用户脚本更新。');
     }
