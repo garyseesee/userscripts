@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.3.0
+// @version      1.3.1
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -30,7 +30,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -63,6 +63,8 @@
     'valuemedia-ltd.com',
     // 2026-10-08 RawINU 首页 1XBET：广告 iframe 与透明点击层共用的来源。
     'traffmovie.com',
+    // 2026-10-16 RawINU 公开引用的广告脚本：链接点击监听及隐藏表单弹窗路径。
+    'patesihobbet.com',
     // 2026-10-11 YTS 实际页面引用的点击广告、悬浮广告脚本及广告框图片来源。
     'sovransbraws.com', 'desaltssakers.com', 'quantedmesquin.qpon',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
@@ -447,6 +449,22 @@
     return !u.search && /^\/movies\/[a-z0-9-]+\/$/i.test(u.pathname) &&
       el.matches('.browse-movie-wrap a.browse-movie-link[href], .browse-movie-wrap a.browse-movie-title[href]');
   }
+  function isRawMangaCardLink(el) {
+    // 首页/列表封面是背景图容器，标题与章节是独立链接；推荐榜单也有三类入口。
+    // 在事件发生时匹配，覆盖轮播克隆、异步列表和榜单切换，不等待扫描。
+    if (SITE_DOMAIN !== 'rawinu.com' || el.hasAttribute('download') ||
+        el.matches('[data-toggle], [data-bs-toggle], [role="button"], [aria-controls]') ||
+        el.closest('form, [contenteditable="true"]')) return false;
+    const card = ':is(.popular-thumb-item, .thumb-item-flow)';
+    const selector = `${card} > .thumb-wrapper > a[href], ${card} > .thumb-wrapper .chapter-title > a[href], ` +
+      `${card} > .series-title > a[href], :is(#day, #month, #all) > .post > .sidebar-content a[href]`;
+    if (!el.matches(selector)) return false;
+    const u = urlOf(el.href);
+    if (!u || u.origin !== location.origin || u.search || u.hash || u.username || u.password) return false;
+    // 仅站内作品/章节直达地址，不接管搜索、书签、评分、榜单按钮和评论。
+    return /^\/manga-(?!list(?:[.-]|$))[a-z0-9][a-z0-9-]*\.html$/i.test(u.pathname) ||
+      /^\/(?:unir|read)-[a-z0-9][a-z0-9-]*-chapter-\d+(?:\.\d+)*\.html$/i.test(u.pathname);
+  }
   function isYtsSearchForm(form, submitter = null) {
     if (SITE_DOMAIN !== 'yts-official.biz' || !(form instanceof Element) || !form.matches('form') ||
         !form.querySelector('input[type="search"][name="keyword"]')) return false;
@@ -463,7 +481,7 @@
     if (!control || !isYtsSearchForm(control.form, control)) return false;
     return control.matches('input[type="search"][name="keyword"], input[type="submit"], button[type="submit"], select');
   }
-  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el) || isYtsBrowseLink(el); }
+  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el) || isRawMangaCardLink(el) || isYtsBrowseLink(el); }
   function protectNavigationKey(e) {
     if (!config.enabled || !config.strictPopups || pick || e.key !== 'Enter') return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
