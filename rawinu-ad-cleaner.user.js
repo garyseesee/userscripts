@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.3.2
+// @version      1.3.3
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -30,7 +30,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -98,6 +98,7 @@
   let expanded = false, lastDirectLink = null, navigationIntent = null;
   let redirectCount = 0, navigationHookOK = false;
   let bookmarkGuardOK = false, bookmarkAdEvents = 0;
+  let ageWarningActions = 0, ageWarningFailures = 0;
 
   function validRule(rule) {
     if (!rule || !['selector', 'resource'].includes(rule.kind)) return false;
@@ -551,7 +552,47 @@
     return control.matches('input[type="search"][name="keyword"], input[type="submit"], button[type="submit"], select');
   }
   function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el) || isRawMangaCardLink(el) || isYtsBrowseLink(el); }
+  function protectAgeWarning(e) {
+    if (!config.enabled || !config.strictPopups || pick || SITE_DOMAIN !== 'rawinu.com' ||
+        !/^\/(?:unir|read)-.+-chapter-\d+(?:\.\d+)*\.html$/.test(location.pathname)) return false;
+    const target = e.target instanceof Element ? e.target : null;
+    const button = target?.closest('button#close[type="button"][data-dismiss="modal"]');
+    // Bootstrap 关闭时移除 role；仍需隔离同一次键盘激活最后的 keyup。
+    const modal = button?.closest('#modal-1.modal');
+    const normalText = el => el?.textContent.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!modal || !button.isConnected || button.ownerDocument !== document || button.disabled ||
+        !button.closest('.modal-footer') || normalText(button) !== 'i know' ||
+        normalText(modal.querySelector('.modal-title')) !== 'age warning') return false;
+    let dialog, hide;
+    try {
+      const jq = page.jQuery;
+      hide = jq?.fn?.modal;
+      // 只使用已确认的 Bootstrap 4 弹窗接口；接口缺失/改版时保留网站原有处理。
+      if (typeof jq !== 'function' || typeof hide !== 'function' || !/^4\./.test(hide.Constructor?.VERSION || '')) return false;
+      dialog = jq(modal);
+    } catch { return false; }
+    if (e.type === 'keydown' || e.type === 'keyup') {
+      if (!['Enter', ' ', 'Spacebar'].includes(e.key)) return false;
+      // 保留按钮的原生键盘激活；只有随后浏览器产生的真实 click 才确认。
+      e.stopImmediatePropagation(); return true;
+    }
+    e.stopImmediatePropagation();
+    if (e.type === 'click' || e.type === 'auxclick') e.preventDefault();
+    if (e.type === 'click' && e.isTrusted && e.button === 0) {
+      try {
+        // 不重放 click，不自动确认或保存同意状态。通过站点自身接口处理
+        // 遮罩、滚动锁和关闭事件，避免广告借用这一手势。
+        Reflect.apply(hide, dialog, ['hide']);
+        ageWarningActions++; log('保护年龄提示点击', 'I Know');
+      } catch {
+        ageWarningFailures++; log('年龄提示关闭失败', '站点弹窗接口异常');
+        tell('站点关闭提示失败。可在广告清理面板暂停保护后重试。');
+      }
+    }
+    return true;
+  }
   function protectNavigationKey(e) {
+    if (protectAgeWarning(e)) return;
     if (!config.enabled || !config.strictPopups || pick || e.key !== 'Enter') return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
     if ((el && isProtectedNavigationLink(el)) || (e.target instanceof Element && isYtsSearchControl(e.target))) e.stopImmediatePropagation();
@@ -584,6 +625,7 @@
       if (e.type === 'click') clickPick(e);
       e.preventDefault(); e.stopImmediatePropagation(); return;
     }
+    if (protectAgeWarning(e)) return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
     if (!el) {
       if (config.strictPopups && e.target instanceof Element && isYtsSearchControl(e.target)) e.stopImmediatePropagation();
@@ -652,6 +694,7 @@
       enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups,
       navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
       bookmarkGuardOK, bookmarkAdEvents,
+      ageWarningActions, ageWarningFailures,
       savedRules: config.rules.length, hidden: hidden.size, popupCount, frames, events };
     const text = JSON.stringify(data, null, 2);
     try { GM_setClipboard(text, 'text'); tell('诊断信息已复制。可粘贴给我继续改进；不含网页正文。'); }
