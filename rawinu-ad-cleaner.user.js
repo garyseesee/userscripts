@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.3.1
+// @version      1.3.2
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -30,7 +30,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -97,6 +97,7 @@
   let hiddenStyle, stylePath, styleText, pick = null, popupCount = 0, rejectedLinks = 0, popupHookOK = false;
   let expanded = false, lastDirectLink = null, navigationIntent = null;
   let redirectCount = 0, navigationHookOK = false;
+  let bookmarkGuardOK = false, bookmarkAdEvents = 0;
 
   function validRule(rule) {
     if (!rule || !['selector', 'resource'].includes(rule.kind)) return false;
@@ -403,6 +404,74 @@
     } catch { /* 浏览器拒绝访问的跨域或沙箱框保持原样。 */ }
   }
   installRealmGuards(page);
+  function isBookmarkActivation(e) {
+    if (SITE_DOMAIN !== 'rawinu.com' || !/^\/manga-(?!list(?:[.-]|$))[^/]+\.html$/.test(location.pathname)) return false;
+    const target = e.composedPath?.().find(n => n?.nodeType === 1) || e.target;
+    const button = target?.closest?.('a#bookmark_btn, button#bookmark_btn');
+    return !!button && button.ownerDocument === document && button.isConnected;
+  }
+  function registrationAdHost() {
+    // 只识别直接注册监听器的调用帧。不能因调用链更上层出现广告就屏蔽
+    // jQuery 等共用分发器，否则会连网站后来注册的收藏处理一起拦掉。
+    try {
+      const caller = String(new Error().stack || '').split('\n')[3] || '';
+      const source = caller.match(/https?:\/\/[^\s)]+/)?.[0]?.replace(/:\d+(?::\d+)?$/, '');
+      const u = source && urlOf(source);
+      return u && isAdURL(u.href) ? u.hostname : '';
+    } catch { return ''; }
+  }
+  function installBookmarkGuard() {
+    if (SITE_DOMAIN !== 'rawinu.com') return;
+    try {
+      const proto = page.EventTarget.prototype;
+      const add = proto.addEventListener, remove = proto.removeEventListener;
+      const types = new Set(['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'auxclick', 'keydown', 'keyup']);
+      const registrations = new WeakMap();
+      const validListener = fn => typeof fn === 'function' || (fn !== null && typeof fn === 'object');
+      const wrappedAdd = function (type, listener, options) {
+        if (!types.has(type) || !validListener(listener)) return Reflect.apply(add, this, arguments);
+        let listeners = registrations.get(this);
+        if (!listeners) registrations.set(this, listeners = new WeakMap());
+        let records = listeners.get(listener);
+        if (!records) listeners.set(listener, records = new Map());
+        let callback = records.get(type);
+        if (!callback) {
+          const adHost = registrationAdHost();
+          callback = adHost ? function (e) {
+            if (config.enabled && config.strictPopups && !pick && isBookmarkActivation(e)) {
+              bookmarkAdEvents++;
+              log('拦截收藏广告监听', adHost);
+              return;
+            }
+            // 只跳过已确认来源的这一条监听器，不停止整个事件传播，不重放点击。
+            // 网站的目标/委托处理及原生表单行为继续执行；不自行发起收藏请求。
+            if (typeof listener === 'function') return Reflect.apply(listener, this, [e]);
+            return listener.handleEvent(e);
+          } : listener;
+          records.set(type, callback);
+        }
+        return Reflect.apply(add, this, [type, callback, options]);
+      };
+      const wrappedRemove = function (type, listener, options) {
+        const callback = validListener(listener) && registrations.get(this)?.get(listener)?.get(type);
+        return Reflect.apply(remove, this, [type, callback || listener, options]);
+      };
+      try {
+        proto.addEventListener = wrappedAdd;
+        proto.removeEventListener = wrappedRemove;
+      } catch {
+        if (proto.addEventListener === wrappedAdd) proto.addEventListener = add;
+        if (proto.removeEventListener === wrappedRemove) proto.removeEventListener = remove;
+        return;
+      }
+      bookmarkGuardOK = proto.addEventListener === wrappedAdd && proto.removeEventListener === wrappedRemove;
+      if (!bookmarkGuardOK) {
+        if (proto.addEventListener === wrappedAdd) proto.addEventListener = add;
+        if (proto.removeEventListener === wrappedRemove) proto.removeEventListener = remove;
+      }
+    } catch { /* 无法识别来源或挂接时保留网站功能，原有弹窗/导航保护继续运行。 */ }
+  }
+  installBookmarkGuard();
   function isChapterLink(el) {
     // 只保护已确认的翻页控件及同一作品的直达章节链接。
     // 不拦评论、章节选择框等依赖站点 JavaScript 的操作。
@@ -582,6 +651,7 @@
     const data = { version: VERSION, host: location.hostname, pageType: /chapter/i.test(location.pathname) ? 'chapter' : 'other',
       enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups,
       navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
+      bookmarkGuardOK, bookmarkAdEvents,
       savedRules: config.rules.length, hidden: hidden.size, popupCount, frames, events };
     const text = JSON.stringify(data, null, 2);
     try { GM_setClipboard(text, 'text'); tell('诊断信息已复制。可粘贴给我继续改进；不含网页正文。'); }
