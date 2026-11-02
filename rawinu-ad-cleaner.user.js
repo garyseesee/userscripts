@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.3.3
+// @version      1.3.4
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -30,7 +30,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.3.3';
+  const VERSION = '1.3.4';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -65,6 +65,8 @@
     'traffmovie.com',
     // 2026-10-16 RawINU 公开引用的广告脚本：链接点击监听及隐藏表单弹窗路径。
     'patesihobbet.com',
+    // 2026-11-02 当前 RawINU 聊天广告落地链接与其 SDK、视频资源。
+    'marzaent.com', 'fozekikikiminu.com', 'sabtpledge.com',
     // 2026-10-11 YTS 实际页面引用的点击广告、悬浮广告脚本及广告框图片来源。
     'sovransbraws.com', 'desaltssakers.com', 'quantedmesquin.qpon',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
@@ -80,6 +82,7 @@
     ...(SITE_DOMAIN === 'rawinu.com' ? ['#ad-slik'] : []),
     // 首页实测的整块广告位；不依赖创意图片、随机 class 或点击层的资源规则。
     ...(SITE_DOMAIN === 'rawinu.com' ? ['#zone_1772741137'] : []),
+    ...(SITE_DOMAIN === 'rawinu.com' ? ['.ts-im-container'] : []),
     ...(SITE_DOMAIN === 'nihonkuni.com' ? [
       '.ad-placeholder', 'ins[id="1127812"]',
       // 实际元素检查确认的嵌套 Criteo 横幅外层；内层框没有顶层可见 src。
@@ -90,6 +93,8 @@
   const CANDIDATES = [...BUILTIN, 'iframe', 'img[src]', 'img[data-src]', 'a[href]'].join(',');
   const hidden = new Map();
   const frameStates = new Map();
+  const widgetFrameObservers = new Map();
+  const mediaStates = new Map();
   const temporary = new Set();
   const events = [];
   const pending = new Set();
@@ -146,6 +151,7 @@
   }
   function knownReasonFor(el) {
     if (el.matches(BUILTIN.join(','))) return '广告容器';
+    if (el.localName === 'iframe' && isWidgetFrame(el)) return '聊天广告框';
     if (['iframe', 'img', 'a'].includes(el.localName) && resourceOf(el) && isAdURL(resourceOf(el))) return '已知广告来源';
     return null;
   }
@@ -181,13 +187,67 @@
   function putAttribute(el, name, value) {
     if (value === null) el.removeAttribute(name); else el.setAttribute(name, value);
   }
+  function isFloatingBlankFrame(f) {
+    if (SITE_DOMAIN !== 'rawinu.com' || !f?.isConnected || f.localName !== 'iframe') return false;
+    const src = f.getAttribute('src');
+    return (!src || src === 'about:blank') && getComputedStyle(f).position === 'fixed';
+  }
+  function watchWidgetFrame(f, doc) {
+    if (!isFloatingBlankFrame(f) || !doc || frameStates.has(f)) return;
+    const old = widgetFrameObservers.get(f);
+    if (old?.doc === doc) return;
+    old?.observer.disconnect();
+    const observer = new MutationObserver(() => {
+      if (!config.enabled || !f.isConnected || frameStates.has(f)) return;
+      hideKnown(f, false); queue(f);
+    });
+    // 观察 Document：广告使用 document.write/close 后才插入内容，观察旧 body 会漏掉。
+    observer.observe(doc, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'href'] });
+    widgetFrameObservers.set(f, { doc, observer });
+  }
+  function isWidgetFrame(f) {
+    if (frameStates.get(f)?.widgetAd) return true;
+    if (!isFloatingBlankFrame(f)) return false;
+    try {
+      const doc = f.contentDocument;
+      if (!doc) return false;
+      watchWidgetFrame(f, doc);
+      if (doc.querySelector('.ts-inpage-push-dating a.ts-inpage-push__link')) return true;
+      // 实测广告框先加载此样式，再插入聊天卡片；尽早识别，不按尺寸或广告文案猜测。
+      return [...doc.querySelectorAll('link[rel="stylesheet"][href]')].some(el => {
+        const u = urlOf(el.href);
+        return u?.hostname === 'cdn.tsyndicate.com' && u.pathname === '/sdk/v1/inpage.push.v2.css';
+      });
+    } catch { return false; }
+  }
+  function stopAdMedia(media) {
+    if (!mediaStates.has(media)) mediaStates.set(media, { autoplay: media.getAttribute('autoplay'), playing: !media.paused });
+    media.removeAttribute('autoplay');
+    try { if (!media.paused) media.pause(); } catch { /* 媒体接口不可用时保留隐藏。 */ }
+  }
+  function syncMedia() {
+    for (const el of hidden.keys()) {
+      const media = el.matches('video,audio') ? [el] : el.querySelectorAll('video,audio');
+      for (const m of media) stopAdMedia(m);
+    }
+    for (const [m, old] of mediaStates) {
+      if (config.enabled && m.isConnected && m.closest(`[${MARK}="1"]`)) continue;
+      mediaStates.delete(m); putAttribute(m, 'autoplay', old.autoplay);
+      if (m.isConnected && old.playing) {
+        try { m.play()?.catch(() => {}); } catch { /* 浏览器可能限制恢复播放。 */ }
+      }
+    }
+  }
+  document.addEventListener('play', e => {
+    if (config.enabled && e.target instanceof HTMLMediaElement && e.target.closest(`[${MARK}="1"]`)) stopAdMedia(e.target);
+  }, true);
   function syncFrames() {
     // 已确认广告中的 iframe 改为空白沙箱，尽力停止后续活动。
     // 这不能撤销已经发出的请求，也不能关闭已经弹出的窗口。
     for (const el of hidden.keys()) {
       const frames = el.localName === 'iframe' ? [el] : el.querySelectorAll('iframe');
       for (const f of frames) {
-        if (!frameStates.has(f)) frameStates.set(f, { src: f.getAttribute('src'), srcdoc: f.getAttribute('srcdoc'), sandbox: f.getAttribute('sandbox') });
+        if (!frameStates.has(f)) frameStates.set(f, { src: f.getAttribute('src'), srcdoc: f.getAttribute('srcdoc'), sandbox: f.getAttribute('sandbox'), widgetAd: isWidgetFrame(f) });
         if (f.getAttribute('sandbox') !== '') f.setAttribute('sandbox', '');
         if (f.hasAttribute('srcdoc')) f.removeAttribute('srcdoc');
         if (f.getAttribute('src') !== 'about:blank') f.setAttribute('src', 'about:blank');
@@ -199,6 +259,10 @@
       putAttribute(f, 'sandbox', old.sandbox);
       putAttribute(f, 'srcdoc', old.srcdoc);
       putAttribute(f, 'src', old.src);
+    }
+    for (const [f, watched] of widgetFrameObservers) {
+      if (config.enabled && isFloatingBlankFrame(f) && !frameStates.has(f)) continue;
+      watched.observer.disconnect(); widgetFrameObservers.delete(f);
     }
   }
   function visit(root, selector, fn) {
@@ -237,7 +301,7 @@
       if (!el.isConnected) restore(el);
       else if (root === document || root === el || root.contains?.(el)) inspect(el);
     }
-    syncFrames(); updateUI();
+    syncFrames(); syncMedia(); updateUI();
   }
   function queue(root = document) {
     if (!config.enabled || own(root)) return;
@@ -276,6 +340,8 @@
       if (own(r.target)) continue;
       if (r.type === 'attributes') {
         const old = frameStates.get(r.target);
+        if (old?.widgetAd && ((r.attributeName === 'src' && r.target.getAttribute('src') !== 'about:blank') ||
+            (r.attributeName === 'srcdoc' && r.target.hasAttribute('srcdoc')))) old.widgetAd = false;
         if (old && r.attributeName === 'src' && r.target.getAttribute('src') !== 'about:blank') old.src = r.target.getAttribute('src');
         if (old && r.attributeName === 'srcdoc' && r.target.hasAttribute('srcdoc')) old.srcdoc = r.target.getAttribute('srcdoc');
         hideKnown(r.target, false);
@@ -368,6 +434,7 @@
       const doc = win.document;
       if (!doc || guardedRealms.has(doc)) return;
       guardedRealms.add(doc);
+      if (win !== page) watchWidgetFrame(win.frameElement, doc);
       win.addEventListener('click', rememberNavigationIntent, true);
       win.addEventListener('keydown', rememberNavigationIntent, true);
       const original = win.open;
@@ -676,7 +743,7 @@
   function setEnabled() {
     config.enabled = !config.enabled;
     stopPick();
-    if (!config.enabled) { [...hidden.keys()].forEach(restore); syncFrames(); } else queue();
+    if (!config.enabled) { [...hidden.keys()].forEach(restore); syncFrames(); syncMedia(); } else queue();
     persist(); tell(config.enabled ? '已恢复清理。' : '已恢复被隐藏的元素，弹窗和外跳限制也已暂停。');
   }
   function undo() {
@@ -695,6 +762,7 @@
       navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
       bookmarkGuardOK, bookmarkAdEvents,
       ageWarningActions, ageWarningFailures,
+      pausedMedia: mediaStates.size,
       savedRules: config.rules.length, hidden: hidden.size, popupCount, frames, events };
     const text = JSON.stringify(data, null, 2);
     try { GM_setClipboard(text, 'text'); tell('诊断信息已复制。可粘贴给我继续改进；不含网页正文。'); }
@@ -819,7 +887,7 @@
     if (!el || !el.isConnected || protectedElement(el)) return tell('请先选中一个独立广告。');
     const rule = makeRule(el);
     if (!rule) {
-      temporary.add(el); stopPick(); hide(el, '本页临时选择'); syncFrames();
+      temporary.add(el); stopPick(); hide(el, '本页临时选择'); syncFrames(); syncMedia();
       tell('已临时隐藏。这个元素没有稳定标记，刷新后需重新选择，避免误伤其它位置。'); updateUI(); return;
     }
     const count = [...document.querySelectorAll(rule.kind === 'selector' ? rule.value : rule.tag)].filter(n => ruleMatches(n, rule)).length;
