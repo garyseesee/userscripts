@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.3.4
+// @version      1.3.5
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -30,7 +30,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.3.4';
+  const VERSION = '1.3.5';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -540,6 +540,56 @@
     } catch { /* 无法识别来源或挂接时保留网站功能，原有弹窗/导航保护继续运行。 */ }
   }
   installBookmarkGuard();
+  let bookmarkActions = 0, bookmarkFailures = 0;
+  function protectBookmark(e) {
+    if (!config.enabled || !config.strictPopups || pick || !isBookmarkActivation(e)) return false;
+    const target = e.composedPath?.().find(n => n?.nodeType === 1) || e.target;
+    const button = target.closest('#bookmark_btn');
+    const form = document.querySelector('form#bookmark_form');
+    const action = form && urlOf(form.action);
+    // 2026-11-03 实页：无 href 的按钮通过 jQuery submit 调用 main.js 中的
+    // ajaxSubmit 处理。只接管这一结构，保留其它按钮和改版后的未知实现。
+    if (button.hasAttribute('href') || button.disabled ||
+        !['bookmark', 'unbookmark'].includes(button.getAttribute('action')) ||
+        document.querySelectorAll('#bookmark_btn').length !== 1 ||
+        document.querySelectorAll('#bookmark_form').length !== 1 ||
+        !form || form.method.toLowerCase() !== 'post' ||
+        !action || action.origin !== location.origin || action.search || action.hash ||
+        action.pathname !== '/app/manga/controllers/cont.bookmark.php' ||
+        !form.querySelector('input[type="hidden"][name="token"]') ||
+        !form.querySelector('input[type="hidden"][name="mid"]') ||
+        !document.querySelector('#bookmark_output')) return false;
+    let jq, submit, wrapped;
+    try {
+      jq = page.jQuery;
+      submit = jq?.fn?.triggerHandler;
+      if (typeof jq !== 'function' || typeof submit !== 'function' ||
+          typeof jq.Event !== 'function' || typeof jq.fn.ajaxSubmit !== 'function') return false;
+      wrapped = jq(form);
+    } catch { return false; }
+    if (e.type === 'keydown' || e.type === 'keyup') {
+      if (!['Enter', ' ', 'Spacebar'].includes(e.key)) return false;
+      e.stopImmediatePropagation(); return true;
+    }
+    e.stopImmediatePropagation();
+    if (e.type === 'click' || e.type === 'auxclick') e.preventDefault();
+    if (e.type === 'click' && e.isTrusted && e.button === 0) {
+      // 网站在请求完成前显示 Waiting...，避免连续点击重复切换收藏状态。
+      if (/^waiting\.{3}$/i.test(button.textContent.trim())) return true;
+      try {
+        const event = jq.Event('submit');
+        // 不重放 click、不原生提交、不自行拼 token 或请求。只触发表单自身的
+        // 网站处理，避免 submit 冒泡到广告；保留原 AJAX、回显和状态切换。
+        Reflect.apply(submit, wrapped, [event]);
+        if (!event.isDefaultPrevented()) throw new Error('bookmark handler unavailable');
+        bookmarkActions++; log('保护收藏点击', '站点表单处理');
+      } catch {
+        bookmarkFailures++; log('收藏处理失败', '站点表单接口异常');
+        tell('收藏处理未能确认。请刷新后检查收藏状态；不要连续点击。');
+      }
+    }
+    return true;
+  }
   function isChapterLink(el) {
     // 只保护已确认的翻页控件及同一作品的直达章节链接。
     // 不拦评论、章节选择框等依赖站点 JavaScript 的操作。
@@ -659,6 +709,7 @@
     return true;
   }
   function protectNavigationKey(e) {
+    if (protectBookmark(e)) return;
     if (protectAgeWarning(e)) return;
     if (!config.enabled || !config.strictPopups || pick || e.key !== 'Enter') return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
@@ -692,7 +743,7 @@
       if (e.type === 'click') clickPick(e);
       e.preventDefault(); e.stopImmediatePropagation(); return;
     }
-    if (protectAgeWarning(e)) return;
+    if (protectBookmark(e) || protectAgeWarning(e)) return;
     const el = e.target instanceof Element ? e.target.closest('a[href]') : null;
     if (!el) {
       if (config.strictPopups && e.target instanceof Element && isYtsSearchControl(e.target)) e.stopImmediatePropagation();
@@ -760,7 +811,7 @@
     const data = { version: VERSION, host: location.hostname, pageType: /chapter/i.test(location.pathname) ? 'chapter' : 'other',
       enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups,
       navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
-      bookmarkGuardOK, bookmarkAdEvents,
+      bookmarkGuardOK, bookmarkAdEvents, bookmarkActions, bookmarkFailures,
       ageWarningActions, ageWarningFailures,
       pausedMedia: mediaStates.size,
       savedRules: config.rules.length, hidden: hidden.size, popupCount, frames, events };
