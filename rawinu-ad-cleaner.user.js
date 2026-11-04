@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.3.5
+// @version      1.3.6
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -30,7 +30,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.3.5';
+  const VERSION = '1.3.6';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -83,6 +83,8 @@
     // 首页实测的整块广告位；不依赖创意图片、随机 class 或点击层的资源规则。
     ...(SITE_DOMAIN === 'rawinu.com' ? ['#zone_1772741137'] : []),
     ...(SITE_DOMAIN === 'rawinu.com' ? ['.ts-im-container'] : []),
+    // 2026-11-04 实页引用的 dd.interstitial.ts.js：全屏视频/图片插屏外层。
+    ...(SITE_DOMAIN === 'rawinu.com' ? ['.ts-interstitial', '#ts-main-banner-wrapper'] : []),
     ...(SITE_DOMAIN === 'nihonkuni.com' ? [
       '.ad-placeholder', 'ins[id="1127812"]',
       // 实际元素检查确认的嵌套 Criteo 横幅外层；内层框没有顶层可见 src。
@@ -103,6 +105,7 @@
   let expanded = false, lastDirectLink = null, navigationIntent = null;
   let redirectCount = 0, navigationHookOK = false;
   let bookmarkGuardOK = false, bookmarkAdEvents = 0;
+  let interstitialAdEvents = 0, interstitialLockBody = null;
   let ageWarningActions = 0, ageWarningFailures = 0;
 
   function validRule(rule) {
@@ -265,6 +268,23 @@
       watched.observer.disconnect(); widgetFrameObservers.delete(f);
     }
   }
+  function syncInterstitialLock() {
+    if (SITE_DOMAIN !== 'rawinu.com' || !document.body) return;
+    const body = document.body, lock = 'ts-interstitial__body-fixed';
+    const active = [...document.querySelectorAll('.ts-interstitial,#ts-main-banner-wrapper')]
+      .filter(el => !protectedElement(el) && !el.classList.contains('ts-interstitial__hidden'));
+    if (config.enabled) {
+      if (active.some(el => hidden.has(el)) && body.classList.contains(lock)) {
+        interstitialLockBody = body;
+        body.classList.remove(lock);
+      }
+      if (!active.length || interstitialLockBody !== body) interstitialLockBody = null;
+    } else {
+      // 仅恢复本脚本移除的广告专用锁；不改 Bootstrap 等其它弹窗的滚动状态。
+      if (interstitialLockBody === body && active.length) body.classList.add(lock);
+      interstitialLockBody = null;
+    }
+  }
   function visit(root, selector, fn) {
     if (root.nodeType === 1 && root.matches(selector)) fn(root);
     root.querySelectorAll?.(selector).forEach(fn);
@@ -301,7 +321,7 @@
       if (!el.isConnected) restore(el);
       else if (root === document || root === el || root.contains?.(el)) inspect(el);
     }
-    syncFrames(); syncMedia(); updateUI();
+    syncFrames(); syncMedia(); syncInterstitialLock(); updateUI();
   }
   function queue(root = document) {
     if (!config.enabled || own(root)) return;
@@ -478,15 +498,15 @@
     const button = target?.closest?.('a#bookmark_btn, button#bookmark_btn');
     return !!button && button.ownerDocument === document && button.isConnected;
   }
-  function registrationAdHost() {
+  function registrationAdSource() {
     // 只识别直接注册监听器的调用帧。不能因调用链更上层出现广告就屏蔽
     // jQuery 等共用分发器，否则会连网站后来注册的收藏处理一起拦掉。
     try {
       const caller = String(new Error().stack || '').split('\n')[3] || '';
       const source = caller.match(/https?:\/\/[^\s)]+/)?.[0]?.replace(/:\d+(?::\d+)?$/, '');
       const u = source && urlOf(source);
-      return u && isAdURL(u.href) ? u.hostname : '';
-    } catch { return ''; }
+      return u && isAdURL(u.href) ? u : null;
+    } catch { return null; }
   }
   function installBookmarkGuard() {
     if (SITE_DOMAIN !== 'rawinu.com') return;
@@ -504,8 +524,17 @@
         if (!records) listeners.set(listener, records = new Map());
         let callback = records.get(type);
         if (!callback) {
-          const adHost = registrationAdHost();
+          const source = registrationAdSource(), adHost = source?.hostname;
+          const interstitial = type === 'click' && source?.hostname === 'cdn.fozekikikiminu.com' &&
+            source.pathname === '/sdk/v1/dd.interstitial.ts.js';
           callback = adHost ? function (e) {
+            // 该已确认广告监听会取消正常链接、锁住正文，再显示插屏。
+            // 只跳过这一路回调；保留其它监听器、默认导航及暂停后的原有行为。
+            if (config.enabled && interstitial) {
+              interstitialAdEvents++;
+              log('拦截全屏广告监听', adHost);
+              return;
+            }
             if (config.enabled && config.strictPopups && !pick && isBookmarkActivation(e)) {
               bookmarkAdEvents++;
               log('拦截收藏广告监听', adHost);
@@ -794,7 +823,7 @@
   function setEnabled() {
     config.enabled = !config.enabled;
     stopPick();
-    if (!config.enabled) { [...hidden.keys()].forEach(restore); syncFrames(); syncMedia(); } else queue();
+    if (!config.enabled) { [...hidden.keys()].forEach(restore); syncFrames(); syncMedia(); syncInterstitialLock(); } else queue();
     persist(); tell(config.enabled ? '已恢复清理。' : '已恢复被隐藏的元素，弹窗和外跳限制也已暂停。');
   }
   function undo() {
@@ -812,6 +841,7 @@
       enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups,
       navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
       bookmarkGuardOK, bookmarkAdEvents, bookmarkActions, bookmarkFailures,
+      interstitialAdEvents,
       ageWarningActions, ageWarningFailures,
       pausedMedia: mediaStates.size,
       savedRules: config.rules.length, hidden: hidden.size, popupCount, frames, events };
