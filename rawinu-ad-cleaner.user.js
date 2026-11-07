@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.3.6
+// @version      1.4.0
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -30,7 +30,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.3.6';
+  const VERSION = '1.4.0';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -39,13 +39,14 @@
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
   const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
-  const defaults = { enabled: true, strictPopups: true, blockRedirects: true, rules: [] };
+  const defaults = { enabled: true, strictPopups: true, blockRedirects: true, readerShield: true, rules: [] };
   let saved;
   try { saved = GM_getValue(KEY, defaults); } catch { saved = defaults; }
   const config = {
     enabled: saved?.enabled !== false,
     strictPopups: saved?.strictPopups !== false,
     blockRedirects: saved?.blockRedirects !== false,
+    readerShield: saved?.readerShield !== false,
     rules: Array.isArray(saved?.rules) ? saved.rules.filter(validRule).slice(-100) : [],
   };
 
@@ -67,12 +68,21 @@
     'patesihobbet.com',
     // 2026-11-02 当前 RawINU 聊天广告落地链接与其 SDK、视频资源。
     'marzaent.com', 'fozekikikiminu.com', 'sabtpledge.com',
+    // 2026-11-07 实际章节加载的 Exo 广告提供程序；不封禁通用视频 CDN。
+    'magsrv.com',
     // 2026-10-11 YTS 实际页面引用的点击广告、悬浮广告脚本及广告框图片来源。
     'sovransbraws.com', 'desaltssakers.com', 'quantedmesquin.qpon',
     'doubleclick.net', 'googlesyndication.com', 'adsterra.com',
     'popads.net', 'popcash.net', 'exoclick.com',
   ];
+  // 按广告引擎的稳定结构匹配，不保存每次投放的随机 ID、图片或落地网址。
+  const AD_FAMILIES = SITE_DOMAIN === 'rawinu.com' ? [
+    '.exo-video-slider-container-wrapper', '.msg-video-slider-container-wrapper',
+    '[id$="-msg-video-slider-content"]:has(video):has(.exo_close)',
+    '.exo_wrapper:has(video):has(.exo_close)',
+  ] : [];
   const BUILTIN = [
+    ...AD_FAMILIES,
     // 当前三路广告脚本共用的悬浮层根节点；包含通知、宝箱、礼物及插屏。
     '[data-shb="1"]',
     '.ad-sandbox-container', 'ins.adsbygoogle', '[data-ad-slot]',
@@ -92,6 +102,9 @@
     ] : []),
   ];
   const PROTECTED = 'html,body,head,main,nav,header,footer,form,#chapter-images,.chapter-content,.chapter-img,.img-wrapper,.chapter-images,.chapter-image-wrapper,.reading-content,.reading-controls-wrapper,.reading-header';
+  const FLOATING_SAFE = `${PROTECTED},#${UI},.modal,[role="dialog"],[role="alertdialog"],[contenteditable="true"]`;
+  const READER_PATH = /^\/unir-.+-chapter-\d+(?:\.\d+)?\.html$/;
+  const HIDE_CSS = 'display:none!important;visibility:hidden!important;pointer-events:none!important;content-visibility:hidden!important;';
   const CANDIDATES = [...BUILTIN, 'iframe', 'img[src]', 'img[data-src]', 'a[href]'].join(',');
   const hidden = new Map();
   const frameStates = new Map();
@@ -158,11 +171,43 @@
     if (['iframe', 'img', 'a'].includes(el.localName) && resourceOf(el) && isAdURL(resourceOf(el))) return '已知广告来源';
     return null;
   }
+  function floatingReasonFor(el) {
+    if (!config.readerShield || SITE_DOMAIN !== 'rawinu.com' || !READER_PATH.test(location.pathname) ||
+        !el.matches('div,aside,section') || protectedElement(el) ||
+        el.closest(FLOATING_SAFE.replace('html,body,head,', '')) || el.querySelector(FLOATING_SAFE)) return null;
+    const media = [...el.querySelectorAll('video,iframe')];
+    if (!media.length || !['fixed', 'sticky'].includes(getComputedStyle(el).position)) return null;
+    if (media.some(m => isAdURL(resourceOf(m)))) return '阅读页浮动广告来源';
+    // 未知域名只在“浮动媒体 + 明确广告标识 + 站外行动链接”同时存在时处理。
+    // 普通视频、评论、验证码、网站提示或只有 Ad 文案的内容不能触发。
+    const externalAction = [...el.querySelectorAll('a[href]')].some(a => {
+      const u = urlOf(a.getAttribute('href'));
+      return u && /^https?:$/.test(u.protocol) && !sameSiteURL(u);
+    });
+    if (!externalAction) return null;
+    const labelled = [...el.querySelectorAll('small,span,label,[aria-label],[title]')].slice(0,80).some(n =>
+      /^(?:ad|advertisement|sponsored|广告|廣告|広告)$/i.test((n.getAttribute('aria-label') || n.getAttribute('title') || n.textContent).trim()));
+    return labelled ? '阅读页浮动广告组合特征' : null;
+  }
+  function scanFloating(root) {
+    if (!config.readerShield || SITE_DOMAIN !== 'rawinu.com' || !READER_PATH.test(location.pathname)) return;
+    const seen = new Set();
+    visit(root, 'video,iframe', media => {
+      for (let el = media.parentElement, depth = 0; el && depth < 7; el = el.parentElement, depth++) {
+        if (el === document.body || seen.has(el)) break;
+        seen.add(el);
+        const reason = floatingReasonFor(el);
+        if (reason) hide(el, reason);
+      }
+    });
+  }
   function reasonFor(el) {
     if (protectedElement(el)) return null;
     if (temporary.has(el)) return '本页临时选择';
     const known = knownReasonFor(el);
     if (known) return known;
+    const floating = floatingReasonFor(el);
+    if (floating) return floating;
     const srcdoc = frameStates.has(el) ? frameStates.get(el).srcdoc : el.getAttribute('srcdoc');
     if (el.localName === 'iframe' && srcdoc) {
       // 只检查嵌入 HTML 的实际资源 URL，不因正文提到域名就误判。
@@ -174,17 +219,27 @@
   }
   function hide(el, reason) {
     if (!hidden.has(el)) {
-      hidden.set(el, { display: el.style.getPropertyValue('display'), priority: el.style.getPropertyPriority('display'), marker: el.getAttribute(MARK) });
+      hidden.set(el, { display: el.style.getPropertyValue('display'), priority: el.style.getPropertyPriority('display'), marker: el.getAttribute(MARK),
+        visibility: el.style.getPropertyValue('visibility'), visibilityPriority: el.style.getPropertyPriority('visibility'),
+        contentVisibility: el.style.getPropertyValue('content-visibility'), contentVisibilityPriority: el.style.getPropertyPriority('content-visibility'),
+        pointerEvents: el.style.getPropertyValue('pointer-events'), pointerEventsPriority: el.style.getPropertyPriority('pointer-events') });
       log('隐藏', reason);
     }
     if (el.getAttribute(MARK) !== '1') el.setAttribute(MARK, '1');
     if (el.style.getPropertyValue('display') !== 'none' || el.style.getPropertyPriority('display') !== 'important') el.style.setProperty('display', 'none', 'important');
+    for (const [name, value] of [['visibility','hidden'], ['content-visibility','hidden'], ['pointer-events','none']]) {
+      if (el.style.getPropertyValue(name) !== value || el.style.getPropertyPriority(name) !== 'important') el.style.setProperty(name,value,'important');
+    }
   }
   function restore(el) {
     const old = hidden.get(el);
     if (!old) return;
     if (old.marker === null) el.removeAttribute(MARK); else el.setAttribute(MARK, old.marker);
     if (old.display) el.style.setProperty('display', old.display, old.priority); else el.style.removeProperty('display');
+    for (const [name, value, priority] of [['visibility',old.visibility,old.visibilityPriority],
+      ['content-visibility',old.contentVisibility,old.contentVisibilityPriority],['pointer-events',old.pointerEvents,old.pointerEventsPriority]]) {
+      if (value) el.style.setProperty(name,value,priority); else el.style.removeProperty(name);
+    }
     hidden.delete(el);
   }
   function putAttribute(el, name, value) {
@@ -310,6 +365,7 @@
       else if (hidden.has(el)) restore(el);
     };
     visit(root, CANDIDATES, inspect);
+    scanFloating(root);
     for (const rule of config.rules.filter(activeRule)) {
       if (rule.kind === 'selector') visit(root, rule.value, inspect);
     }
@@ -332,20 +388,23 @@
       timer = null;
       const roots = [...pending]; pending.clear();
       if (roots.length > 40 || roots.includes(document)) scan();
-      else for (const r of roots) if (r.isConnected) scan(r);
+      // 同一次变化可能同时触及视频、卡片与外层，只扫描最外层一次。
+      else for (const r of roots) {
+        if (r.isConnected && !roots.some(parent => parent !== r && parent.contains?.(r))) scan(r);
+      }
     }, 100);
   }
   function ensureStyle(refresh = false) {
     if (!document.documentElement) return;
     if (refresh || stylePath !== location.pathname) {
       stylePath = location.pathname;
-      styleText = `[${MARK}="1"] { display: none !important; }`;
+      styleText = `[${MARK}="1"] { ${HIDE_CSS} }`;
       if (config.enabled) {
         // 先放入已知广告及当前路径的记忆规则，元素出现时由 CSS 直接隐藏。
         // 同样排除阅读区、表单、面板及包含这些内容的祖先；不隐藏整页等待扫描。
         const selectors = [...BUILTIN, ...config.rules.filter(r => r.kind === 'selector' && activeRule(r)).map(r => r.value)];
         const protectedSelectors = `${PROTECTED},#${UI}`;
-        styleText += `\n:is(${selectors.join(',')}):not(${protectedSelectors}):not(:has(${protectedSelectors})) { display: none !important; }`;
+        styleText += `\n:is(${selectors.join(',')}):not(${protectedSelectors}):not(:has(${protectedSelectors})) { ${HIDE_CSS} }`;
       }
     }
     if (!hiddenStyle?.isConnected) {
@@ -353,11 +412,24 @@
       hiddenStyle.textContent = styleText;
       (document.head || document.documentElement).append(hiddenStyle);
     } else if (hiddenStyle.textContent !== styleText) hiddenStyle.textContent = styleText;
+    if (hiddenStyle.disabled) hiddenStyle.disabled = false;
+    if (hiddenStyle.hasAttribute('media')) hiddenStyle.removeAttribute('media');
+  }
+  function checkAncestors(node, checked) {
+    // :has() 结构、迟到的 video/source/关闭按钮及祖先样式变化都要重新检查整块外层。
+    for (let el = node?.nodeType === 1 ? node : node?.parentElement, depth = 0; el && depth < 7; el = el.parentElement, depth++) {
+      if (own(el) || el === document.body || el === document.documentElement || checked.has(el)) break;
+      checked.add(el);
+      hideKnown(el, false);
+      queue(el);
+    }
   }
   const observer = new MutationObserver(records => {
     ensureStyle();
+    const checked = new Set();
     for (const r of records) {
       if (own(r.target)) continue;
+      checkAncestors(r.target, checked);
       if (r.type === 'attributes') {
         const old = frameStates.get(r.target);
         if (old?.widgetAd && ((r.attributeName === 'src' && r.target.getAttribute('src') !== 'about:blank') ||
@@ -374,7 +446,8 @@
     }
   });
   observer.observe(document, { subtree: true, childList: true, attributes: true,
-    attributeFilter: ['class', 'id', 'src', 'srcdoc', 'href', 'style', 'data-src', 'data-ad-slot', 'data-shb', MARK] });
+    characterData: true,
+    attributeFilter: ['class', 'id', 'src', 'srcdoc', 'href', 'style', 'media', 'aria-label', 'title', 'data-src', 'data-ad-slot', 'data-shb', MARK] });
   ensureStyle();
   // 兼容脚本启动时页面已存在内容的情况；详细扫描仍保留批处理。
   hideKnown(document);
@@ -818,6 +891,7 @@
     shadow.getElementById('toggle').textContent = config.enabled ? '暂停并恢复页面' : '恢复清理';
     shadow.getElementById('strict').textContent = `限制站外脚本弹窗：${config.strictPopups ? '开' : '关'}`;
     shadow.getElementById('redirects').textContent = `阻止自动外跳：${navigationHookOK ? (config.blockRedirects ? '开' : '关') : '浏览器不支持'}`;
+    shadow.getElementById('reader-shield').textContent = `阅读页浮动广告防护：${config.readerShield ? '开' : '关'}`;
     shadow.getElementById('rules').textContent = `已记住 ${config.rules.length} 条规则 · 阻止广告链接 ${rejectedLinks} 次`;
   }
   function setEnabled() {
@@ -838,7 +912,7 @@
       width: Math.round(e.getBoundingClientRect().width), height: Math.round(e.getBoundingClientRect().height),
     }));
     const data = { version: VERSION, host: location.hostname, pageType: /chapter/i.test(location.pathname) ? 'chapter' : 'other',
-      enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups,
+      enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups, readerShield: config.readerShield,
       navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
       bookmarkGuardOK, bookmarkAdEvents, bookmarkActions, bookmarkFailures,
       interstitialAdEvents,
@@ -871,6 +945,7 @@
     add('取消选择（Esc）', stopPick);
     add('撤销最后一条规则', undo);
     add('暂停并恢复页面', setEnabled, 'toggle');
+    add('阅读页浮动广告防护：开', () => { config.readerShield = !config.readerShield; persist(); queue(); }, 'reader-shield');
     add('限制站外脚本弹窗：开', () => { config.strictPopups = !config.strictPopups; persist(); }, 'strict');
     add('阻止自动外跳：开', () => { config.blockRedirects = !config.blockRedirects; navigationIntent = null; persist(); }, 'redirects');
     add('重新扫描', () => { queue(); tell('已安排重新扫描。'); });
@@ -947,6 +1022,9 @@
   function makeRule(el) {
     const scope = location.pathname;
     const unique = selector => document.querySelectorAll(selector).length === 1;
+    for (const value of AD_FAMILIES) {
+      if (el.closest(value)) return { kind: 'selector', value, path: null };
+    }
     if (el.id && !/\d{6}|[a-f0-9]{16}/i.test(el.id)) {
       const value = `#${cssEscape(el.id)}`;
       if (unique(value)) return { kind: 'selector', value, path: /(^|[-_])ads?([-_]|$)|advert/i.test(el.id) ? null : scope };
