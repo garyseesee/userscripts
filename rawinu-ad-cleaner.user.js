@@ -1,18 +1,20 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.4.0
+// @version      1.4.1
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
 // @downloadURL  https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
-// @description  支持 RawINU、NihonKuni 与 yts-official.biz：清理广告框、限制弹窗和当前页自动外跳，点选记忆、撤销和暂停。
+// @description  支持 RawINU、NihonKuni 与 YTS（yts-official.biz / yts-official.im）：清理广告框、限制弹窗和当前页自动外跳，点选记忆、撤销和暂停。
 // @match        *://rawinu.com/*
 // @match        *://*.rawinu.com/*
 // @match        *://nihonkuni.com/*
 // @match        *://*.nihonkuni.com/*
 // @match        *://yts-official.biz/*
 // @match        *://*.yts-official.biz/*
+// @match        *://yts-official.im/*
+// @match        *://*.yts-official.im/*
 // @run-at       document-start
 // @sandbox      JavaScript
 // @noframes
@@ -30,11 +32,12 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
-  const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
+  const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz', 'yts-official.im'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
-  const SITE_NAME = { 'rawinu.com': 'RawINU', 'nihonkuni.com': 'NihonKuni', 'yts-official.biz': 'YTS' }[SITE_DOMAIN];
+  const IS_YTS = ['yts-official.biz', 'yts-official.im'].includes(SITE_DOMAIN);
+  const SITE_NAME = IS_YTS ? 'YTS' : { 'rawinu.com': 'RawINU', 'nihonkuni.com': 'NihonKuni' }[SITE_DOMAIN];
   const KEY = `rawinu-cleaner:v1:${location.hostname}`;
   const MARK = 'data-rawinu-cleaner-hidden';
   const UI = 'rawinu-ad-cleaner-ui';
@@ -728,7 +731,7 @@
   }
   function isYtsBrowseLink(el) {
     // 实测浏览页的页码和影片封面/标题均为原生链接；不接管播放、下载或其它功能。
-    if (SITE_DOMAIN !== 'yts-official.biz' || !/^\/browse-movies\/?$/.test(location.pathname) || el.hasAttribute('download')) return false;
+    if (!IS_YTS || !/^\/browse-movies\/?$/.test(location.pathname) || el.hasAttribute('download')) return false;
     const u = urlOf(el.href);
     if (!u || u.origin !== location.origin || u.hash) return false;
     if (el.matches('ul.tsc_pagination > li > a[href]')) {
@@ -755,7 +758,7 @@
       /^\/(?:unir|read)-[a-z0-9][a-z0-9-]*-chapter-\d+(?:\.\d+)*\.html$/i.test(u.pathname);
   }
   function isYtsSearchForm(form, submitter = null) {
-    if (SITE_DOMAIN !== 'yts-official.biz' || !(form instanceof Element) || !form.matches('form') ||
+    if (!IS_YTS || !(form instanceof Element) || !form.matches('form') ||
         !form.querySelector('input[type="search"][name="keyword"]')) return false;
     // 只隔离已检查的快速搜索、桌面搜索及移动端搜索表单。
     if (!(form.id === 'quick-search' || (/^\/browse-movies\/?$/.test(location.pathname) &&
