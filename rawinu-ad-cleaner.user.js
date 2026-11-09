@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.4.1
+// @version      1.4.2
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -32,7 +32,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.4.1';
+  const VERSION = '1.4.2';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz', 'yts-official.im'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -121,6 +121,7 @@
   let expanded = false, lastDirectLink = null, navigationIntent = null;
   let redirectCount = 0, navigationHookOK = false;
   let bookmarkGuardOK = false, bookmarkAdEvents = 0;
+  let ytsAdGuardOK = false, ytsAdEvents = 0;
   let interstitialAdEvents = 0, interstitialLockBody = null;
   let ageWarningActions = 0, ageWarningFailures = 0;
 
@@ -584,12 +585,15 @@
       return u && isAdURL(u.href) ? u : null;
     } catch { return null; }
   }
-  function installBookmarkGuard() {
-    if (SITE_DOMAIN !== 'rawinu.com') return;
+  function installAdEventGuard() {
+    if (SITE_DOMAIN !== 'rawinu.com' && !IS_YTS) return;
     try {
       const proto = page.EventTarget.prototype;
       const add = proto.addEventListener, remove = proto.removeEventListener;
       const types = new Set(['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'auxclick', 'keydown', 'keyup']);
+      // 2026-11-09 YTS 详情页引用的广告程序还监听窗口 blur，借框内点击弹窗。
+      // 仅扩展已确认广告来源的事件过滤；不吞掉站点自己的按钮或播放器事件。
+      if (IS_YTS) { types.add('blur'); types.add('focus'); }
       const registrations = new WeakMap();
       const validListener = fn => typeof fn === 'function' || (fn !== null && typeof fn === 'object');
       const wrappedAdd = function (type, listener, options) {
@@ -601,9 +605,16 @@
         let callback = records.get(type);
         if (!callback) {
           const source = registrationAdSource(), adHost = source?.hostname;
-          const interstitial = type === 'click' && source?.hostname === 'cdn.fozekikikiminu.com' &&
+          const ytsAd = IS_YTS && ['sovransbraws.com', 'desaltssakers.com'].some(h =>
+            adHost === h || adHost?.endsWith(`.${h}`));
+          const interstitial = SITE_DOMAIN === 'rawinu.com' && type === 'click' && source?.hostname === 'cdn.fozekikikiminu.com' &&
             source.pathname === '/sdk/v1/dd.interstitial.ts.js';
           callback = adHost ? function (e) {
+            if (config.enabled && config.strictPopups && ytsAd) {
+              ytsAdEvents++;
+              log('拦截 YTS 广告监听', adHost);
+              return;
+            }
             // 该已确认广告监听会取消正常链接、锁住正文，再显示插屏。
             // 只跳过这一路回调；保留其它监听器、默认导航及暂停后的原有行为。
             if (config.enabled && interstitial) {
@@ -637,14 +648,16 @@
         if (proto.removeEventListener === wrappedRemove) proto.removeEventListener = remove;
         return;
       }
-      bookmarkGuardOK = proto.addEventListener === wrappedAdd && proto.removeEventListener === wrappedRemove;
-      if (!bookmarkGuardOK) {
+      const installed = proto.addEventListener === wrappedAdd && proto.removeEventListener === wrappedRemove;
+      bookmarkGuardOK = SITE_DOMAIN === 'rawinu.com' && installed;
+      ytsAdGuardOK = IS_YTS && installed;
+      if (!installed) {
         if (proto.addEventListener === wrappedAdd) proto.addEventListener = add;
         if (proto.removeEventListener === wrappedRemove) proto.removeEventListener = remove;
       }
     } catch { /* 无法识别来源或挂接时保留网站功能，原有弹窗/导航保护继续运行。 */ }
   }
-  installBookmarkGuard();
+  installAdEventGuard();
   let bookmarkActions = 0, bookmarkFailures = 0;
   function protectBookmark(e) {
     if (!config.enabled || !config.strictPopups || pick || !isBookmarkActivation(e)) return false;
@@ -741,6 +754,20 @@
     return !u.search && /^\/movies\/[a-z0-9-]+\/$/i.test(u.pathname) &&
       el.matches('.browse-movie-wrap a.browse-movie-link[href], .browse-movie-wrap a.browse-movie-title[href]');
   }
+  function isYtsDetailLink(el) {
+    // 公开详情页的推荐海报及页首导航是原生直达链接。保留下载、播放、
+    // 预告片与图片灯箱的 JS 处理，不按整页所有 a 标签一刀切。
+    if (!IS_YTS || !/^\/movies\/[a-z0-9-]+\/$/i.test(location.pathname) ||
+        el.hasAttribute('download') || el.matches('[role="button"], [data-toggle], [data-bs-toggle], [aria-controls]') ||
+        el.closest('form,[contenteditable="true"]')) return false;
+    const u = urlOf(el.href);
+    if (!u || u.origin !== location.origin || u.username || u.password || u.hash) return false;
+    if (el.matches('#movie-related > a[href]')) {
+      return !u.search && /^\/movies\/[a-z0-9-]+\/$/i.test(u.pathname);
+    }
+    if (!el.matches('header.nav-bar .nav-logo > a[href], header.nav-bar .nav-links > li > a[href], header.nav-bar .nav-mobile-buttons > a[href]')) return false;
+    return (u.pathname === '/' && !u.search) || /^\/browse-movies\/?$/.test(u.pathname);
+  }
   function isRawMangaCardLink(el) {
     // 首页/列表封面是背景图容器，标题与章节是独立链接；推荐榜单也有三类入口。
     // 在事件发生时匹配，覆盖轮播克隆、异步列表和榜单切换，不等待扫描。
@@ -762,7 +789,9 @@
         !form.querySelector('input[type="search"][name="keyword"]')) return false;
     // 只隔离已检查的快速搜索、桌面搜索及移动端搜索表单。
     if (!(form.id === 'quick-search' || (/^\/browse-movies\/?$/.test(location.pathname) &&
-        form.querySelector('#main-search-fields, .input-group.container.search-query')))) return false;
+        form.querySelector('#main-search-fields, .input-group.container.search-query')) ||
+        (/^\/movies\/[a-z0-9-]+\/$/i.test(location.pathname) && form.closest('#mobile-search-input') &&
+        form.querySelector('.input-group.container.search-query')))) return false;
     const u = urlOf(submitter?.hasAttribute('formaction') ? submitter.formAction : form.action);
     const method = submitter?.hasAttribute('formmethod') ? submitter.formMethod : form.method;
     return String(method).toLowerCase() === 'get' && !!u && u.origin === location.origin &&
@@ -773,7 +802,7 @@
     if (!control || !isYtsSearchForm(control.form, control)) return false;
     return control.matches('input[type="search"][name="keyword"], input[type="submit"], button[type="submit"], select');
   }
-  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el) || isRawMangaCardLink(el) || isYtsBrowseLink(el); }
+  function isProtectedNavigationLink(el) { return isChapterLink(el) || isListPageLink(el) || isDirectoryChapterLink(el) || isRawMangaCardLink(el) || isYtsBrowseLink(el) || isYtsDetailLink(el); }
   function protectAgeWarning(e) {
     if (!config.enabled || !config.strictPopups || pick || SITE_DOMAIN !== 'rawinu.com' ||
         !/^\/(?:unir|read)-.+-chapter-\d+(?:\.\d+)*\.html$/.test(location.pathname)) return false;
@@ -918,6 +947,7 @@
       enabled: config.enabled, popupHookOK, strictPopups: config.strictPopups, readerShield: config.readerShield,
       navigationHookOK, blockRedirects: config.blockRedirects, redirectCount,
       bookmarkGuardOK, bookmarkAdEvents, bookmarkActions, bookmarkFailures,
+      ytsAdGuardOK, ytsAdEvents,
       interstitialAdEvents,
       ageWarningActions, ageWarningFailures,
       pausedMedia: mediaStates.size,
