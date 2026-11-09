@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RawINU 广告清理与规则记忆
 // @namespace    local.rawinu.ad-cleaner
-// @version      1.4.2
+// @version      1.4.3
 // @homepageURL  https://github.com/garyseesee/userscripts
 // @supportURL   https://github.com/garyseesee/userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js
@@ -32,7 +32,7 @@
   // 这是页面清理脚本，不是浏览器网络过滤器。删除 script 不能撤销已经执行的代码。
   // 不在运行时加载远程代码或上传浏览记录；新版由 Tampermonkey 按更新设置下载。
   // 只保存当前主机的用户设置和点选规则。
-  const VERSION = '1.4.2';
+  const VERSION = '1.4.3';
   const UPDATE_URL = 'https://raw.githubusercontent.com/garyseesee/userscripts/main/rawinu-ad-cleaner.user.js';
   const SITE_DOMAIN = ['rawinu.com', 'nihonkuni.com', 'yts-official.biz', 'yts-official.im'].find(h => location.hostname === h || location.hostname.endsWith(`.${h}`));
   if (!SITE_DOMAIN) return;
@@ -597,9 +597,12 @@
       const registrations = new WeakMap();
       const validListener = fn => typeof fn === 'function' || (fn !== null && typeof fn === 'object');
       const wrappedAdd = function (type, listener, options) {
-        if (!types.has(type) || !validListener(listener)) return Reflect.apply(add, this, arguments);
-        let listeners = registrations.get(this);
-        if (!listeners) registrations.set(this, listeners = new WeakMap());
+        // 原生 Window 方法允许独立调用：null/undefined 接收者指向当前全局。
+        // 先统一接收者，避免缓存的方法以 undefined 作为 WeakMap 键而报错。
+        const target = this == null ? page : this;
+        if (!types.has(type) || !validListener(listener) || !validListener(target)) return Reflect.apply(add, this, arguments);
+        let listeners = registrations.get(target);
+        if (!listeners) registrations.set(target, listeners = new WeakMap());
         let records = listeners.get(listener);
         if (!records) listeners.set(listener, records = new Map());
         let callback = records.get(type);
@@ -634,11 +637,12 @@
           } : listener;
           records.set(type, callback);
         }
-        return Reflect.apply(add, this, [type, callback, options]);
+        return Reflect.apply(add, target, [type, callback, options]);
       };
       const wrappedRemove = function (type, listener, options) {
-        const callback = validListener(listener) && registrations.get(this)?.get(listener)?.get(type);
-        return Reflect.apply(remove, this, [type, callback || listener, options]);
+        const target = this == null ? page : this;
+        const callback = validListener(listener) && registrations.get(target)?.get(listener)?.get(type);
+        return Reflect.apply(remove, target, [type, callback || listener, options]);
       };
       try {
         proto.addEventListener = wrappedAdd;
